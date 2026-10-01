@@ -223,7 +223,9 @@ class Cargus_Public {
 				'cargus',
 				plugin_dir_url( __FILE__ ) . 'js/cargus.js',
 				array( 'jquery' ),
-				$this->version,
+				// The plugin version alone never changes when the script does,
+				// so browsers and CDNs keep serving a stale copy for hours.
+				$this->version . '.' . filemtime( plugin_dir_path( __FILE__ ) . 'js/cargus.js' ),
 				false
 			);
 
