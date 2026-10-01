@@ -1,5 +1,64 @@
 jQuery(function ($) {
     let runningIndex = 0;
+
+    // select2/selectWoo is not guaranteed to be on the page: themes and
+    // optimisation plugins routinely dequeue it on the checkout. Every call
+    // to it goes through these helpers, so a missing library degrades to the
+    // native control instead of throwing and leaving the field empty.
+    const select2Method = function () {
+        if (typeof $.fn.select2 === 'function') {
+            return 'select2';
+        }
+        if (typeof $.fn.selectWoo === 'function') {
+            return 'selectWoo';
+        }
+        return null;
+    };
+
+    const enhanceSelect = function ($select, options) {
+        const method = select2Method();
+        if (method && $select.length) {
+            $select[method](options);
+            return true;
+        }
+        return false;
+    };
+
+    const destroySelect = function ($select) {
+        const method = select2Method();
+        if (method && $select.hasClass('select2-hidden-accessible')) {
+            $select[method]('destroy');
+        }
+    };
+
+    // Parse an admin-ajax answer that should be JSON. admin-ajax answers "0"
+    // or an empty body when the handler bailed out; treat that as "nothing".
+    const parseJson = function (data) {
+        if (typeof data !== 'string') {
+            return data;
+        }
+        try {
+            return JSON.parse(data);
+        } catch (e) {
+            return null;
+        }
+    };
+
+    // The element that carries the street-id / postal-numbers attributes:
+    // the selected <option> of a street <select>, or the street <input>.
+    const streetDataSource = function (section) {
+        const street = $('[name="' + section + '_street"]');
+        return street.prop('nodeName') === 'SELECT' ? street.find('option:selected') : street;
+    };
+
+    // Plain text street input, used whenever there is no usable street list.
+    const streetTextInput = function (attr_name, attr_id, attr_placeholder, value) {
+        return $('<input type="text" class="input-text" autocomplete="street-address" />').attr({
+            name: attr_name,
+            id: attr_id,
+            placeholder: attr_placeholder || null,
+        }).val(value || '');
+    };
     // Replace the billing/sipping city field.
     const filterStates = function (section, initialRun) {
         initialRun = runningIndex === 0;
@@ -31,9 +90,7 @@ jQuery(function ($) {
                     element.replaceWith('<select class="' + attr_class + '" name="' + attr_name + '"  id="' + attr_id + '"><option elementValue km="0">-</option></select>');
                 }
 
-                if ($('select[name="' + attr_name + '"]').hasClass('select2-hidden-accessible')) {
-                    $('select[name="' + attr_name + '"]').select2('destroy');
-                }
+                destroySelect($('select[name="' + attr_name + '"]'));
 
                 $.ajax({
                     type: "POST",
@@ -47,7 +104,24 @@ jQuery(function ($) {
                         security: ajax_var.nonce,
                     },
                     success: function (data) {
-                        data = JSON.parse(data);
+                        data = parseJson(data);
+
+                        // No locality list for this county (API down, empty
+                        // cache, no token): give the customer a text field
+                        // for the locality instead of a select with only "-".
+                        if (!data || typeof data !== 'object' || Object.keys(data).filter(function (k) { return k !== '-'; }).length === 0) {
+                            const citySelect = $('select[name="' + attr_name + '"]');
+                            destroySelect(citySelect);
+                            citySelect.replaceWith($('<input type="text" class="input-text" />').attr({
+                                name: attr_name,
+                                id: attr_id,
+                                placeholder: attr_placeholder || null,
+                                autocomplete: attr_autocomplete || 'address-level2',
+                            }).val(initialRun && elementValue && elementValue !== '-' ? elementValue : ''));
+                            $('[name="' + section + '_city"]').trigger('change', {'initial': initialRun});
+                            return;
+                        }
+
                         for (const [key, value] of Object.entries(data)) {
                             $('select[name="' + attr_name + '"]').append($("<option></option>").attr({
                                 'km': value[0],
@@ -65,9 +139,7 @@ jQuery(function ($) {
 
                         if ($('[name="' + section + '_street"]').prop('nodeName') == 'SELECT') {
                             $('[name="' + section + '_street"]').empty();
-                            if ($('[name="' + section + '_street"]').hasClass('select2-hidden-accessible')) {
-                                $('[name="' + section + '_street"]').select2('destroy');
-                            }
+                            destroySelect($('[name="' + section + '_street"]'));
                         } else {
                             $('[name="' + section + '_street"]').val('');
                         }
@@ -77,8 +149,8 @@ jQuery(function ($) {
                             $('[name="' + section + '_street_number"]').val('');
                         }
 
-                        // make city field select2.
-                        $('select[name="' + attr_name + '"]').select2({
+                        // make city field select2 (stays a native select when select2 is not loaded).
+                        enhanceSelect($('select[name="' + attr_name + '"]'), {
                             width: '100%'
                         });
 
@@ -97,7 +169,7 @@ jQuery(function ($) {
                 if (type != 'INPUT') {
                     if ($('[name="' + section + '_city"]').hasClass('select2-hidden-accessible')) {
                         $('[name="' + section + '_city"]').empty();
-                        $('[name="' + section + '_city"]').select2('destroy');
+                        destroySelect($('[name="' + section + '_city"]'));
                     }
 
                     $('[name="' + section + '_city"]').replaceWith('<input type="text" class="input-text" name="' + attr_name + '"  id="' + attr_id + '"' + (attr_placeholder ? ' placeholder="' + attr_placeholder + '"' : '') + ' autocomplete="' + attr_autocomplete + '" value="" />');
@@ -106,7 +178,7 @@ jQuery(function ($) {
                 if ($('[name="' + section + '_street"]').prop('nodeName') != 'INPUT') {
                     if ($('[name="' + section + '_street"]').hasClass('select2-hidden-accessible')) {
                         $('[name="' + section + '_street"]').empty();
-                        $('[name="' + section + '_street"]').select2('destroy');
+                        destroySelect($('[name="' + section + '_street"]'));
                     }
 
                     $('[name="' + section + '_street"]').replaceWith('<input type="text" class="input-text" name="' + section + '_street"  id="' + section + '_street" value="" />');
@@ -164,6 +236,90 @@ jQuery(function ($) {
                 hideAddressField('shipping');
             });
 
+            // Map a cargus_get_streets answer to select2 results. The answer
+            // can be "null", "0" or an empty body when the lookup failed.
+            const streetResults = function (data) {
+                if (!Array.isArray(data)) {
+                    return [];
+                }
+                return data.map(function (item) {
+                    return {
+                        id: item.StreetName,
+                        streetId: item.StreetId,
+                        text: item.StreetName,
+                        PostalNumbers: item.PostalNumbers
+                    };
+                });
+            };
+
+            // Native fallback for the street list when select2 is not loaded:
+            // a free-text input with a <datalist> of the matching streets.
+            // Whatever the customer types is accepted; when it matches a known
+            // street the street id and postal numbers are kept on the input so
+            // the postcode lookup and the AWB street id still work.
+            const attachStreetSuggestions = function (section) {
+                const input = $('input[name="' + section + '_street"]');
+                if (!input.length) {
+                    return;
+                }
+
+                const listId = input.attr('id') + '_list';
+                let list = $('#' + listId);
+                if (!list.length) {
+                    list = $('<datalist></datalist>').attr('id', listId);
+                    input.after(list);
+                }
+                input.attr('list', listId);
+
+                let known = {};
+                let timer = null;
+                let lastTerm = '';
+
+                const remember = function () {
+                    const match = known[$.trim(input.val()).toLowerCase()];
+                    if (match) {
+                        input.attr('street-id', match.StreetId);
+                        input.attr('postal-numbers', match.PostalNumbers);
+                    } else {
+                        input.removeAttr('street-id').removeAttr('postal-numbers');
+                    }
+                };
+
+                input.off('.cargusStreets').on('input.cargusStreets', function () {
+                    remember();
+                    const term = $.trim(input.val());
+                    if (term.length < 2 || term === lastTerm) {
+                        return;
+                    }
+                    clearTimeout(timer);
+                    timer = setTimeout(function () {
+                        lastTerm = term;
+                        $.ajax({
+                            type: 'POST',
+                            url: ajax_var.url,
+                            dataType: 'json',
+                            data: {
+                                q: term,
+                                action: 'cargus_get_streets',
+                                city: $('[name="' + section + '_city"]').find('option:selected').attr('locality-id'),
+                                security: ajax_var.nonce,
+                            },
+                            success: function (data) {
+                                list.empty();
+                                if (!Array.isArray(data)) {
+                                    return;
+                                }
+                                data.slice(0, 50).forEach(function (item) {
+                                    known[String(item.StreetName).toLowerCase()] = item;
+                                    list.append($('<option></option>').attr('value', item.StreetName));
+                                });
+                                remember();
+                            }
+                        });
+                    }, 200);
+                }).on('change.cargusStreets', remember);
+            };
+
             // Replace the billing/shipping street field.
             const filterCities = function (section, initialRun = false) {
                 const street = $('[name="' + section + '_street"]');
@@ -174,19 +330,30 @@ jQuery(function ($) {
                 const attr_placeholder = street.attr('placeholder');
 
                 const city = $('[name="' + section + '_city"]');
+                const cityIsSelect = city.prop('nodeName') === 'SELECT';
                 const cityPostalCode = city.find('option:selected').attr('postal-code');
+                const cityLocalityId = city.find('option:selected').attr('locality-id');
 
-                if (street != null && $('[name="' + section + '_country"]').val() == 'RO') {
-                    if (street.hasClass('select2-hidden-accessible') && street.prop('nodeName') == 'SELECT') {
+                // Streets can only be looked up for a locality picked from the
+                // Cargus list (a select with a locality id). A typed locality has
+                // no street list, so the street is free text.
+                const cityHasStreetList = cityIsSelect && cityLocalityId !== undefined && cityLocalityId !== '' &&
+                    jQuery.inArray(cityPostalCode, [undefined, '0', 'NULL']) !== -1;
+
+                if (street.length && $('[name="' + section + '_country"]').val() == 'RO') {
+                    destroySelect(street);
+                    if (street.prop('nodeName') == 'SELECT') {
                         street.empty();
-                        street.select2('destroy');
                     }
-                    if (jQuery.inArray(cityPostalCode, [undefined, '0', 'NULL']) !== -1) {
-                        if (street.prop('nodeName') != 'SELECT') {
-                            street.replaceWith('<select class="' + attr_class + '" name="' + attr_name + '"  id="' + attr_id + '"></select>');
+
+                    if (cityHasStreetList && select2Method()) {
+                        let streetSelect = $('[name="' + section + '_street"]');
+                        if (streetSelect.prop('nodeName') != 'SELECT') {
+                            streetSelect.replaceWith('<select class="' + attr_class + '" name="' + attr_name + '"  id="' + attr_id + '"></select>');
+                            streetSelect = $('select[name="' + section + '_street"]');
                         }
 
-                        $('select[name="' + section + '_street"]').select2({
+                        enhanceSelect(streetSelect, {
                             language: {
                                 searching: function () {
                                     return "Procesare...";
@@ -216,17 +383,22 @@ jQuery(function ($) {
                                         type: type,
                                     };
                                 },
-                                processResults: function (data) {
-                                    let res = data.map(function (item) {
-                                        return {
-                                            id: item.StreetName,
-                                            streetId: item.StreetId,
-                                            text: item.StreetName,
-                                            PostalNumbers: item.PostalNumbers
-                                        };
+                                processResults: function (data, params) {
+                                    const results = streetResults(data);
+                                    // A street that is missing from the Cargus list
+                                    // (or a locality whose list is empty) can still
+                                    // be entered as typed. It is offered after the
+                                    // known streets, so the first match stays the
+                                    // highlighted one.
+                                    const term = $.trim((params && params.term) || '');
+                                    const exists = results.some(function (r) {
+                                        return String(r.text).toLowerCase() === term.toLowerCase();
                                     });
+                                    if (term.length >= 2 && !exists) {
+                                        results.push({id: term, text: term});
+                                    }
                                     return {
-                                        results: res
+                                        results: results
                                     };
                                 },
                                 cache: true
@@ -237,10 +409,14 @@ jQuery(function ($) {
                             templateResult: formatOption,
                             templateSelection: formatOptionSelection,
                             width: '100%',
-                        }).on('change', function (e) {
-                            if ($(this).select2('data')[0].PostalNumbers) {
-                                $(this).find('option:selected').attr('postal-numbers', $(this).select2('data')[0].PostalNumbers);
-                                $(this).find('option:selected').attr('street-id', $(this).select2('data')[0].streetId);
+                        });
+
+                        streetSelect.off('change.cargus').on('change.cargus', function (e) {
+                            const selected = $(this)[select2Method()]('data')[0];
+                            const option = $(this).find('option:selected');
+                            if (selected && selected.PostalNumbers) {
+                                option.attr('postal-numbers', selected.PostalNumbers);
+                                option.attr('street-id', selected.streetId);
                             }
                         });
 
@@ -249,8 +425,21 @@ jQuery(function ($) {
                         }
 
                     } else {
-                        street.replaceWith('<input type="text" class="input-text" name="' + attr_name + '"  id="' + attr_id + '"' + (attr_placeholder ? ' placeholder="' + attr_placeholder + '"' : '') + ' autocomplete="street" value="" />');
-                        $('[name="' + section + '_postcode"]').val($('[name="' + section + '_city"]').find('option:selected').attr('postal-code'));
+                        const currentStreet = $('[name="' + section + '_street"]');
+                        currentStreet.replaceWith(streetTextInput(attr_name, attr_id, attr_placeholder, ''));
+
+                        if (cityHasStreetList) {
+                            // select2 is not available: native input + suggestions.
+                            attachStreetSuggestions(section);
+                            if (!initialRun) {
+                                $('[name="' + section + '_postcode"]').val('');
+                            }
+                        } else {
+                            $('#' + attr_id + '_list').remove();
+                            if (cityIsSelect && cityPostalCode !== undefined && jQuery.inArray(cityPostalCode, ['0', 'NULL']) === -1) {
+                                $('[name="' + section + '_postcode"]').val(cityPostalCode);
+                            }
+                        }
                     }
 
                     if (!initialRun) {
@@ -259,8 +448,8 @@ jQuery(function ($) {
 
                     function formatOption(city) {
                         let $container = $(
-                            "<div class='select2-result-title'>" + city.text + "</div>"
-                        );
+                            "<div class='select2-result-title'></div>"
+                        ).text(city.text);
 
                         return $container;
                     }
@@ -269,7 +458,7 @@ jQuery(function ($) {
                         return city.text;
                     }
                 } else {
-                    street.replaceWith('<input type="text" class="input-text" name="' + attr_name + '"  id="' + attr_id + '"' + (attr_placeholder ? ' placeholder="' + attr_placeholder + '"' : '') + ' autocomplete="street" value="" />');
+                    street.replaceWith(streetTextInput(attr_name, attr_id, attr_placeholder, ''));
                 }
             }
 
@@ -375,17 +564,35 @@ jQuery(function ($) {
 
             // Add and select the default value if there is one.
             const streetAddAjaxOption = function (section, params) {
+                const streetName = params && params.streetName;
+                if (!streetName || streetName === '0') {
+                    return;
+                }
+
+                // Free-text street (no street list, or no select2): restore the
+                // saved value as typed.
+                if ($('[name="' + section + '_street"]').prop('nodeName') !== 'SELECT') {
+                    $('[name="' + section + '_street"]').val(streetName).trigger('change');
+                    return;
+                }
+
                 $.ajax({
                     type: "POST",
                     url: ajax_var.url,
                     dataType: 'json',
                     data: {
                         action: 'cargus_get_streets',
-                        city: $('[name="billing_city"]').find('option:selected').attr('locality-id'),
+                        city: $('[name="' + section + '_city"]').find('option:selected').attr('locality-id'),
                         security: ajax_var.nonce,
-                        val: params.streetName
+                        val: streetName
                     },
                     success: function (data) {
+                        if ( ! Array.isArray(data) || ! data.length ) {
+                            // Saved street is not in the Cargus list: keep it as typed.
+                            const option = new Option(String(streetName).replace(/^Str\. /, ''), String(streetName).replace(/^Str\. /, ''), true, true);
+                            $('[name="' + section + '_street"]').append(option).trigger('change');
+                            return;
+                        }
                         if ( null !== data ) {
                             const option = new Option(data[0].StreetName, data[0].StreetName, true, true);
                             $('[name="' + section + '_street"]').append(option);
@@ -422,9 +629,9 @@ jQuery(function ($) {
                     return true;
                 }
 
-                const postalNumbers = $('[name="' + section + '_street"]').find('option:selected').attr('postal-numbers');
+                const postalNumbers = streetDataSource(section).attr('postal-numbers');
 
-                if (postalNumbers != undefined) {
+                if (postalNumbers != undefined && !isNaN(strNumber)) {
                     let noFound = 0;
                     let indexes = [];
                     $.each(JSON.parse(postalNumbers), function (key, value) {
@@ -495,17 +702,24 @@ jQuery(function ($) {
 
             // Set the shipping/billing address 1 value function.
             const setAddressValue = function (section) {
-                if ('' != $('[name="' + section + '_street"]').val()) {
-                    if ('SELECT' == $('[name="' + section + '_street"]').prop('nodeName')) {
-                        $('[name="' + section + '_address_1"]').val('Str. ' + $('[name="' + section + '_street"] option:selected').text());
-                    } else {
-                        $('[name="' + section + '_address_1"]').val($('[name="' + section + '_street"]').val());
-                    }
+                const street = $('[name="' + section + '_street"]');
+                const streetValue = $.trim(street.val() || '');
+                const numberValue = $.trim($('[name="' + section + '_street_number"]').val() || '');
+
+                // Rebuilt from scratch every time, so repeated blurs do not keep
+                // appending ", Nr. ..." to the previous value.
+                if ('' === streetValue) {
+                    return;
                 }
 
-                if ('' != $('[name="' + section + '_street_number"]').val()) {
-                    $('[name="' + section + '_address_1"]').val($('[name="' + section + '_address_1"]').val() + ', Nr. ' + $('[name="' + section + '_street_number"]').val());
+                // "Str. " only for a street picked from the Cargus list; a street
+                // typed by the customer is used exactly as typed.
+                const picked = 'SELECT' == street.prop('nodeName') ? street.find('option:selected') : $();
+                let address = (picked.length && picked.attr('street-id') !== undefined) ? 'Str. ' + $.trim(picked.text()) : streetValue;
+                if ('' !== numberValue) {
+                    address += ', Nr. ' + numberValue;
                 }
+                $('[name="' + section + '_address_1"]').val(address);
             }
 
             // Set the shipping/billing address 1 value function.
@@ -514,15 +728,30 @@ jQuery(function ($) {
                 setAddressValue('shipping');
             });
 
+            // WooCommerce serialises the form in its own submit handler, which
+            // runs before the delegated submit handler above. checkout_place_order
+            // fires before that serialisation, so address_1 is current when sent.
+            $('form.checkout').on('checkout_place_order', function () {
+                setAddressValue('billing');
+                setAddressValue('shipping');
+                return true;
+            });
+
             // Add Street ID to form data.
             const sendStreetId = function (section) {
-                const street = $('#' + section + '_street')
-                if (street.prop('nodeName') === 'SELECT') {
-                    const streetId = street.find('option:selected').attr('street-id');
+                const streetId = streetDataSource(section).attr('street-id');
+                const hidden = $('input[name="' + section + '_street_id"]');
 
-                    $('[name="checkout"]').append("<input type='hidden' name='" + section + "_street_id' value='" + streetId + "' />");
-                } else if ( street.prop('nodeName') !== 'SELECT' && $( 'input[name="'+section+'_street_id"]' ).length ) {
-                    $( 'input[name="'+section+'_street_id"]' ).remove();
+                // Only a street picked from the Cargus list has an id. A typed
+                // street must not send a stale id or the string "undefined".
+                if (streetId !== undefined && /^[0-9]+$/.test(String(streetId))) {
+                    if (hidden.length) {
+                        hidden.val(streetId);
+                    } else {
+                        $('[name="checkout"]').append($("<input type='hidden' />").attr({name: section + '_street_id', value: streetId}));
+                    }
+                } else if (hidden.length) {
+                    hidden.remove();
                 }
 
                 return true;

@@ -584,6 +584,10 @@ class Cargus_Admin {
 	 * @since    1.0.0
 	 */
 	public function cargus_before_checkout_create_order( WC_Order $order, array $data ): void {
+		// Was never loaded, so the isset() below was always false and the
+		// street, street id and street number were never stored on the order.
+		$cargus_options = get_option( 'woocommerce_cargus_settings' );
+
 		if (
 			$order->has_shipping_method( 'cargus' ) ||
 			$order->has_shipping_method( 'cargus_ship_and_go' ) ||

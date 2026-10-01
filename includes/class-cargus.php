@@ -286,6 +286,7 @@ class Cargus {
 		$this->loader->add_filter( 'woocommerce_billing_fields', $plugin_public, 'cargus_load_default_data_billing_fields', 999, 1 );
 		$this->loader->add_filter( 'woocommerce_shipping_fields', $plugin_public, 'cargus_load_default_data_shipping_fields', 999, 1 );
 		$this->loader->add_filter( 'woocommerce_checkout_update_order_review', $plugin_public, 'cargus_checkout_update_order_review' );
+		$this->loader->add_filter( 'woocommerce_checkout_posted_data', $plugin_public, 'cargus_compose_address_from_street', 20, 1 );
 
 		// disable cargus shipping methods and payment gateway if client outside RO.
 		$this->loader->add_filter( 'woocommerce_available_payment_gateways', $plugin_public, 'cargus_disable_payment_gateway' );

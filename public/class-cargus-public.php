@@ -278,6 +278,8 @@ class Cargus_Public {
 			wp_die( 'Nonce verification failed' );
 		}
 
+		// Always defined, so the answer is valid JSON even for a text field.
+		$options = array();
 		if ( isset( $_POST['type'] ) && 'SELECT' === $_POST['type'] ) {
 			$options = array( '-' => array( '0', null ) );
 		}
@@ -304,6 +306,10 @@ class Cargus_Public {
 						}
 					}
 				}
+				echo wp_json_encode( $options );
+			} else {
+				// No API token: answer with the empty list instead of an empty
+				// body, so the checkout falls back to a typed locality.
 				echo wp_json_encode( $options );
 			}
 
@@ -431,18 +437,34 @@ class Cargus_Public {
 		$cargus       = Cargus_Api::get_instance();
 		$cargus_token = get_option( 'cargus_login_token' );
 
+		// Always answer with JSON. Without a token, or for a locality with no
+		// street list, the answer used to be an empty body ("0" from
+		// admin-ajax) or "null", which the checkout script could not parse.
+		// An empty array tells it to let the customer type the street.
+		if ( ! $cargus_token || is_array( $cargus_token ) || is_object( $cargus_token ) ) {
+			wp_die( '[]' );
+		}
+
 		if ( $cargus_token && ! is_array( $cargus_token ) && ! is_object( $cargus_token ) ) {
 			// obtin lista de judete din fisier json.
 			$cargus_cache = new Cargus_Cache();
-			if ( isset( $_POST['city'] ) && '' !== $_POST['city'] ) {
+			if ( isset( $_POST['city'] ) && '' !== $_POST['city'] && is_numeric( $_POST['city'] ) ) {
 				$streets = $cargus_cache->get_streets( sanitize_text_field( wp_unslash( $_POST['city'] ) ) );
 				$options = array();
+				$decoded = json_decode( $streets );
 
-				if ( '"No street retrieved!"' !== $streets ) {
+				// Street names in the Cargus list have no diacritics; customers
+				// type them ("Căpșunilor"), so compare without.
+				$search = isset( $_POST['q'] ) ? strtolower( remove_accents( sanitize_text_field( wp_unslash( $_POST['q'] ) ) ) ) : null;
+
+				if ( '"No street retrieved!"' !== $streets && is_array( $decoded ) ) {
 					// generez options pentru dropdown.
-					foreach ( json_decode( $streets ) as $street ) {
+					foreach ( $decoded as $street ) {
+						if ( ! is_object( $street ) || ! isset( $street->Name ) ) { //phpcs:ignore
+							continue;
+						}
 						$street_name = str_replace( ', Strada', '', $street->Name ); //phpcs:ignore
-						if ( isset( $_POST['q'] ) && strpos( strtolower( $street_name ), strtolower( sanitize_text_field( wp_unslash( $_POST['q'] ) ) ) ) !== false ) {
+						if ( null !== $search && '' !== $search && strpos( strtolower( remove_accents( $street_name ) ), $search ) !== false ) {
 							$options[] = array(
 								'StreetName'    => $street_name,
 								'StreetId'      => $street->StreetId, //phpcs:ignore
@@ -463,8 +485,10 @@ class Cargus_Public {
 					}
 					echo wp_json_encode( $options );
 				} else {
-					echo 'null';
+					echo '[]';
 				}
+			} else {
+				echo '[]';
 			}
 			wp_die();
 		}
@@ -822,7 +846,9 @@ class Cargus_Public {
 			if ( isset( $cargus_options['street-select'] ) && 'yes' === $cargus_options['street-select'] ) {
 				$fields['street'] = array(
 					'label'       => __( 'Strada', 'cargus' ),
-					'placeholder' => __( 'Unirii', 'cargus' ),
+					// An example, not a value: a bare "Unirii" / "1" in the
+					// field reads as already filled in, so customers skipped it.
+					'placeholder' => __( 'ex: Unirii', 'cargus' ),
 					'required'    => true,
 					'class'       => array( 'form-row-wide', 'address-field' ),
 					'clear'       => true,
@@ -838,7 +864,7 @@ class Cargus_Public {
 
 				$fields['street_number'] = array(
 					'label'       => __( 'Numar', 'cargus' ),
-					'placeholder' => __( '1', 'cargus' ),
+					'placeholder' => __( 'ex: 12', 'cargus' ),
 					'required'    => true,
 					'class'       => array( 'form-row-wide', 'address-field' ),
 					'clear'       => true,
@@ -847,8 +873,11 @@ class Cargus_Public {
 				);
 
 				if ( WC()->session ) {
-					if ( WC()->session->get( 'street_number' ) ) {
-						$fields['street']['default'] = WC()->session->get( 'street_number' );
+					// The session key is billing_street_number (see
+					// cargus_checkout_update_order_review); it used to read
+					// "street_number" and write the number into the street.
+					if ( WC()->session->get( 'billing_street_number' ) ) {
+						$fields['street_number']['default'] = WC()->session->get( 'billing_street_number' );
 					}
 				}
 			}
@@ -915,6 +944,43 @@ class Cargus_Public {
 		}
 
 		return $fields;
+	}
+
+	/**
+	 * Fill address_1 from the street and street number fields on the server.
+	 *
+	 * With the street fields enabled, address_1 is hidden on the checkout and
+	 * filled in by cargus.js. If the script did not run (a JavaScript error
+	 * elsewhere on the page, a theme that removes select2, a blocked file),
+	 * address_1 arrived empty and WooCommerce rejected the order with a
+	 * "required" error for a field the customer cannot see. This only fills
+	 * address_1 when it is empty; a value set by the script is kept as is.
+	 *
+	 * @since 1.6.0-fix
+	 * @param array $data The posted checkout data.
+	 * @return array
+	 */
+	public function cargus_compose_address_from_street( $data ) {
+		$cargus_options = get_option( 'woocommerce_cargus_settings' );
+		if ( ! is_array( $data ) || ! isset( $cargus_options['street-select'] ) || 'yes' !== $cargus_options['street-select'] ) {
+			return $data;
+		}
+
+		foreach ( array( 'billing', 'shipping' ) as $section ) {
+			$country = isset( $data[ $section . '_country' ] ) ? $data[ $section . '_country' ] : '';
+			$street  = isset( $data[ $section . '_street' ] ) ? trim( (string) $data[ $section . '_street' ] ) : '';
+			$number  = isset( $data[ $section . '_street_number' ] ) ? trim( (string) $data[ $section . '_street_number' ] ) : '';
+
+			if ( 'RO' !== $country || '' === $street || '0' === $street ) {
+				continue;
+			}
+
+			if ( ! isset( $data[ $section . '_address_1' ] ) || '' === trim( (string) $data[ $section . '_address_1' ] ) ) {
+				$data[ $section . '_address_1' ] = $street . ( '' !== $number ? ', Nr. ' . $number : '' );
+			}
+		}
+
+		return $data;
 	}
 
 	/**
