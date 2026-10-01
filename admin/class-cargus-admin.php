@@ -2215,9 +2215,17 @@ class Cargus_Admin {
 					'serviceId' => $cargus_options['service_id'] ?? null,
 				];
 
-				$price  = $cargus->get_shipping_calulation( $fields );
+				$raw_price = $cargus->get_shipping_calulation( $fields );
+				$price     = Cargus_Api::normalize_shipping_calculation( $raw_price );
 
 				$debugger->info("The fields sent to Cargus API for price calculation: " . print_r($fields, true));
+
+				// The API answers errors as a JSON list; reading ->BaseCost etc.
+				// on it raised nine warnings and wrote an empty price note.
+				if ( null === $price ) {
+					$order->add_order_note( 'Dynamic Cargus Shipping Price Calculation failed: ' . Cargus_Api::describe_api_error( $raw_price ) );
+					return;
+				}
 
 				$order_note = 'Dynamic Cargus Shipping Price Calculation:' . PHP_EOL;
 				$order_note .= 'Base Cost: ' . $price->BaseCost . PHP_EOL;

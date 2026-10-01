@@ -603,8 +603,11 @@ if ( ! class_exists( 'Cargus_Shipping_Method' ) ) {
 					$total = WC()->cart->cart_contents_total + array_sum( WC()->cart->get_cart_contents_taxes() );
 
 					// Get ramburs.
-					$ramburs = $total;
-					if ( ! in_array( $current_payment_gateway->id, array( 'cod', 'cargus_ship_and_go_payment' ), true ) ) {
+					// current() returns false when no gateway is available yet
+					// (e.g. the cart is recalculated before gateways load).
+					$current_gateway_id = is_object( $current_payment_gateway ) && isset( $current_payment_gateway->id ) ? $current_payment_gateway->id : '';
+					$ramburs            = $total;
+					if ( ! in_array( $current_gateway_id, array( 'cod', 'cargus_ship_and_go_payment' ), true ) ) {
 						$ramburs = 0;
 					}
 
@@ -736,9 +739,14 @@ if ( ! class_exists( 'Cargus_Shipping_Method' ) ) {
 
 					$fields = Cargus_Admin::get_service_id( $service, $fields, $weight );
 
-					$result = $cargus->get_shipping_calulation( $fields );
+					$raw    = $cargus->get_shipping_calulation( $fields );
+					$result = Cargus_Api::normalize_shipping_calculation( $raw );
 
-					if ( is_null( $result ) || 'error' === $result || ( is_array( $result ) && 'Please send sender locality!' === $result[0] ) || ( is_object( $result ) && property_exists( $result, 'Error' ) ) ) {
+					// Not a price (error list, Error object, no answer): no rate.
+					// Previously an error *array* fell through, $result->Subtotal
+					// read as null and the rate was offered as 0, i.e. free.
+					if ( null === $result || ( property_exists( $result, 'Error' ) ) ) {
+						$debugger->log( 'Cargus shipping calculation did not return a price: ' . Cargus_Api::describe_api_error( $raw ) );
 						return null;
 					}
 

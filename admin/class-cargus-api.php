@@ -744,6 +744,63 @@ if ( ! class_exists( 'Cargus_Api' ) ) {
         }
 
         /**
+         * Normalise a ShippingCalculation answer to the price object.
+         *
+         * call_method() returns json_decode() output, so the answer is an
+         * object for a price, but a PHP array when the API answers with a
+         * JSON array: an error list such as ["Please send sender locality!"],
+         * or the price wrapped in a one-element list. Callers read
+         * $result->Subtotal directly, which raised "Attempt to read property
+         * on array" and evaluated to null.
+         *
+         * @since  1.6.0-fix
+         * @param  mixed $result The value returned by get_shipping_calulation().
+         * @return object|null   The price object, or null when the answer is not a price.
+         */
+        public static function normalize_shipping_calculation( $result ) {
+            $is_price = function ( $candidate ) {
+                if ( is_object( $candidate ) ) {
+                    return property_exists( $candidate, 'Subtotal' ) || property_exists( $candidate, 'GrandTotal' );
+                }
+                if ( is_array( $candidate ) ) {
+                    return array_key_exists( 'Subtotal', $candidate ) || array_key_exists( 'GrandTotal', $candidate );
+                }
+                return false;
+            };
+
+            if ( $is_price( $result ) ) {
+                return (object) $result;
+            }
+
+            if ( is_array( $result ) && ! empty( $result ) ) {
+                $first = reset( $result );
+                if ( $is_price( $first ) ) {
+                    return (object) $first;
+                }
+            }
+
+            return null;
+        }
+
+        /**
+         * Describe an API answer that is not the expected value, for logs and notes.
+         *
+         * @since  1.6.0-fix
+         * @param  mixed $result The API answer.
+         * @return string
+         */
+        public static function describe_api_error( $result ) {
+            if ( is_string( $result ) ) {
+                return $result;
+            }
+            if ( null === $result ) {
+                return 'no answer from the Cargus API';
+            }
+            $json = wp_json_encode( $result );
+            return false === $json ? 'unexpected answer from the Cargus API' : $json;
+        }
+
+        /**
          * Call cargus shipping calculation api endpoint.
          *
          * @param array $fields The shipping calculation fields.
