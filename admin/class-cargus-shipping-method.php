@@ -188,8 +188,18 @@ if ( ! class_exists( 'Cargus_Shipping_Method' ) ) {
 			}
 
 			// get the new cargus pickup locations and price tables.
-			$this->api->get_pickup_locations( true );
-			$this->api->get_price_tables( true );
+			// $this->api is only set above when the webservice URL and API key
+			// are both in the submitted form; saving the method with either
+			// empty (or from a screen that does not post them) was a fatal
+			// "Call to a member function get_pickup_locations() on null".
+			if ( ! ( $this->api instanceof Cargus_Api ) ) {
+				$this->api = Cargus_Api::get_instance();
+			}
+
+			if ( $this->api instanceof Cargus_Api ) {
+				$this->api->get_pickup_locations( true );
+				$this->api->get_price_tables( true );
+			}
 		}
 
 		/**
@@ -236,7 +246,7 @@ if ( ! class_exists( 'Cargus_Shipping_Method' ) ) {
 		public function init_extra_fields() {
 			// obtine lista punctelor de ridicare.
 			global $pagenow;
-			if ( 'admin.php' === $pagenow && 'wc-settings' === $_GET['page'] ) {
+			if ( 'admin.php' === $pagenow && isset( $_GET['page'] ) && 'wc-settings' === $_GET['page'] ) { //phpcs:ignore
 				$this->api = Cargus_Api::get_instance();
 
 				// obtine lista puncte de ridicare.
