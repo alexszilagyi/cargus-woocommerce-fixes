@@ -1,0 +1,1107 @@
+diff --git a/admin/class-cargus-admin.php b/admin/class-cargus-admin.php
+index 996e8e3..98da822 100644
+--- a/admin/class-cargus-admin.php
++++ b/admin/class-cargus-admin.php
+@@ -153,7 +153,9 @@ class Cargus_Admin {
+ 	 * @since    1.5.2
+ 	 */
+ 	public function cargus_start_session(): void {
+-		if ( session_status() === PHP_SESSION_NONE ) {
++		// No longer hooked on init; kept for code that calls it directly.
++		// session_start() after output has begun only raises a warning.
++		if ( session_status() === PHP_SESSION_NONE && ! headers_sent() ) {
+ 			session_start(); // Start the session if it's not already started.
+ 		}
+ 		// Close the session immediately to avoid REST API/loopback interference
+@@ -584,6 +586,10 @@ class Cargus_Admin {
+ 	 * @since    1.0.0
+ 	 */
+ 	public function cargus_before_checkout_create_order( WC_Order $order, array $data ): void {
++		// Was never loaded, so the isset() below was always false and the
++		// street, street id and street number were never stored on the order.
++		$cargus_options = get_option( 'woocommerce_cargus_settings' );
++
+ 		if (
+ 			$order->has_shipping_method( 'cargus' ) ||
+ 			$order->has_shipping_method( 'cargus_ship_and_go' ) ||
+@@ -1154,16 +1160,22 @@ class Cargus_Admin {
+ 						$fields['Envelopes'] = 'envelope' === $cargus_options['type'] ? (int) $colete_no : 0;
+ 					}
+ 
++					// Parcel weights as typed in the order metabox: strings, possibly
++					// empty ("") or with a decimal comma ("2,5"). Adding "" to an int
++					// is a TypeError on PHP 8 and killed the order save.
++					$parcel_weights = self::cargus_meta_list( $order_id, 'cargus_greutate_colet' );
++
+ 					for ( $i = 0; $i < (int) $colete_no; $i++ ) {
+-						$total_weight += unserialize( get_post_meta( $order_id, 'cargus_greutate_colet', true ) )[ $i ];
++						$parcel_weight = self::cargus_to_number( $parcel_weights[ $i ] ?? null );
++						$total_weight += $parcel_weight;
+ 
+ 						$fields['ParcelCodes'][ $i ] = array(
+ 							'Code' => '0',
+ 							'Type' => get_post_meta( $order_id, 'cargus_tip_colet', true ) === 'envelope' ? 0 : 1,
+ 						);
+ 
+-						if ( get_post_meta( $order_id, 'cargus_greutate_colet', true ) ) {
+-							$fields['ParcelCodes'][ $i ]['Weight'] = unserialize( get_post_meta( $order_id, 'cargus_greutate_colet', true ) )[ $i ];
++						if ( $parcel_weight > 0 ) {
++							$fields['ParcelCodes'][ $i ]['Weight'] = $parcel_weight;
+ 						}
+ 
+ 						if ( get_post_meta( $order_id, 'cargus_lungime_colet', true ) ) {
+@@ -1177,7 +1189,8 @@ class Cargus_Admin {
+ 						}
+ 
+ 						if ( get_post_meta( $order_id, 'cargus_continut_colet', true ) ) {
+-							foreach ( unserialize( get_post_meta( $order_id, 'cargus_continut_colet', true ) )[ $i ] as $product_id ) {
++							$parcel_products = self::cargus_meta_list( $order_id, 'cargus_continut_colet' );
++							foreach ( (array) ( $parcel_products[ $i ] ?? array() ) as $product_id ) {
+ 								$product        = wc_get_product( $product_id );
+ 								$parcel_content = array();
+ 								if ( 'product-title' === $cargus_options['parcel_contents'] ) {
+@@ -2129,14 +2142,23 @@ class Cargus_Admin {
+ 			$slug = 'shop_order';
+ 			if ( is_admin() && $slug === $post->post_type ) {
+ 				$cargus_options = get_option( 'woocommerce_cargus_settings' );
+-				$cargus_pickup_points = get_option( 'cargus_pickup_points' );
+ 
+ 				$debugger->info( 'Check dynamic price for order: ' . $post_id );
+ 
+-				foreach ( $cargus_pickup_points as $pickup ) {
+-					if ( $pickup->LocationId == $cargus_options['pickup'] ) {
+-						$location['locality_id'] = $pickup->LocalityId;
++				// "cargus_pickup_points" is no longer written by the plugin, so
++				// this loop ran over false and $location was never defined.
++				$pickup   = Cargus_Api::find_pickup_point( isset( $cargus_options['pickup'] ) ? $cargus_options['pickup'] : null );
++				$location = array();
++				if ( $pickup && isset( $pickup->LocalityId ) ) { //phpcs:ignore
++					$location['locality_id'] = $pickup->LocalityId; //phpcs:ignore
++				}
++
++				if ( empty( $location['locality_id'] ) ) {
++					$order = wc_get_order( $post_id );
++					if ( $order ) {
++						$order->add_order_note( 'Dynamic Cargus Shipping Price Calculation failed: the pickup point selected in the Cargus settings was not found. Save the Cargus settings again to refresh the pickup points.' );
+ 					}
++					return;
+ 				}
+ 
+ 				$cargus = Cargus_Api::get_instance();
+@@ -2209,10 +2231,18 @@ class Cargus_Admin {
+ 					'serviceId' => $cargus_options['service_id'] ?? null,
+ 				];
+ 
+-				$price  = $cargus->get_shipping_calulation( $fields );
++				$raw_price = $cargus->get_shipping_calulation( $fields );
++				$price     = Cargus_Api::normalize_shipping_calculation( $raw_price );
+ 
+ 				$debugger->info("The fields sent to Cargus API for price calculation: " . print_r($fields, true));
+ 
++				// The API answers errors as a JSON list; reading ->BaseCost etc.
++				// on it raised nine warnings and wrote an empty price note.
++				if ( null === $price ) {
++					$order->add_order_note( 'Dynamic Cargus Shipping Price Calculation failed: ' . Cargus_Api::describe_api_error( $raw_price ) );
++					return;
++				}
++
+ 				$order_note = 'Dynamic Cargus Shipping Price Calculation:' . PHP_EOL;
+ 				$order_note .= 'Base Cost: ' . $price->BaseCost . PHP_EOL;
+ 				$order_note .= 'Extra Km Cost: ' . $price->ExtraKmCost . PHP_EOL;
+@@ -2230,6 +2260,42 @@ class Cargus_Admin {
+ 		
+ 	}
+ 
++	/**
++	 * Read a per-parcel list saved by the order metabox repeater.
++	 *
++	 * The repeater stores a serialized array per field; a missing or broken
++	 * value yields an empty list instead of false.
++	 *
++	 * @param int    $order_id The order id.
++	 * @param string $key      The meta key.
++	 *
++	 * @since 1.6.0-fix
++	 * @return array
++	 */
++	private static function cargus_meta_list( $order_id, $key ): array {
++		$raw  = get_post_meta( $order_id, $key, true );
++		$list = is_string( $raw ) ? maybe_unserialize( $raw ) : $raw;
++
++		return is_array( $list ) ? $list : array();
++	}
++
++	/**
++	 * Turn a typed quantity ("2", "2.5", "2,5", "", null) into a number.
++	 *
++	 * @param mixed $value The typed value.
++	 *
++	 * @since 1.6.0-fix
++	 * @return float|int 0 when the value is empty or not numeric.
++	 */
++	private static function cargus_to_number( $value ) {
++		if ( is_int( $value ) || is_float( $value ) ) {
++			return $value;
++		}
++		$value = str_replace( ',', '.', trim( (string) $value ) );
++
++		return is_numeric( $value ) ? $value + 0 : 0;
++	}
++
+ 	/**
+ 	 * Check if an option exists and is numeric.
+ 	 *
+diff --git a/admin/class-cargus-api.php b/admin/class-cargus-api.php
+index b6034ad..e425702 100644
+--- a/admin/class-cargus-api.php
++++ b/admin/class-cargus-api.php
+@@ -165,8 +165,9 @@ if ( ! class_exists( 'Cargus_Api' ) ) {
+         public static function get_instance( $url = '', $key = '' ) {
+             // Ensure session is available for operations
+             if ( ! self::ensure_session_active() ) {
+-                // If session cannot be started, return instance without session operations
+-                if ( self::$instance === null ) {
++                // If session cannot be started, return instance without session operations.
++                // Explicit credentials (settings save) must still replace the instance.
++                if ( self::$instance === null || ( $url !== '' && $key !== '' ) ) {
+                     self::$instance = new self( $url, $key );
+                 }
+                 return self::$instance;
+@@ -197,8 +198,12 @@ if ( ! class_exists( 'Cargus_Api' ) ) {
+          * @return mixed The property value or null if not set.
+          */
+         private function get_instance_property( string $property ) {
++            // Without a session (headers already sent, CLI, cron, REST) the
++            // values on this instance are the ones loaded from the settings.
++            // Returning null here made get_api_key() empty and switched
++            // Ship & Go off for that request and skipped the token refresh cron.
+             if ( ! self::ensure_session_active() ) {
+-                return null;
++                return $this->$property ?? null;
+             }
+ 
+             if ( isset( $_SESSION['cargus_api_instance'] ) ) {
+@@ -208,7 +213,9 @@ if ( ! class_exists( 'Cargus_Api' ) ) {
+                 self::close_session_safely();
+                 return $value;
+             }
+-            return null;
++
++            self::close_session_safely();
++            return $this->$property ?? null;
+         }
+ 
+         /**
+@@ -736,6 +743,119 @@ if ( ! class_exists( 'Cargus_Api' ) ) {
+             return $this->fetch_data( 'PriceTables', 'cached_price_tables', $new_data );
+         }
+ 
++        /**
++         * The sender pickup points, as a list.
++         *
++         * Several callers read get_option( 'cargus_pickup_points' ), an option
++         * that nothing in the current plugin writes any more, so it is false
++         * on every install made with a recent version and foreach() over it
++         * warned. The pickup points come from the PickupLocations endpoint,
++         * cached in a transient by get_pickup_locations(); the old option is
++         * still used first when a site has it.
++         *
++         * @since  1.6.0-fix
++         * @return array List of pickup point objects (possibly empty).
++         */
++        public static function get_pickup_points_list() {
++            $points = get_option( 'cargus_pickup_points' );
++
++            if ( empty( $points ) || ! is_array( $points ) ) {
++                $points = self::get_instance()->get_pickup_locations();
++            }
++
++            if ( ! is_array( $points ) ) {
++                return array();
++            }
++
++            return array_values(
++                array_filter(
++                    array_map(
++                        function ( $point ) {
++                            return is_array( $point ) ? (object) $point : $point;
++                        },
++                        $points
++                    ),
++                    'is_object'
++                )
++            );
++        }
++
++        /**
++         * The pickup point with the given LocationId, or null.
++         *
++         * @since  1.6.0-fix
++         * @param  int|string $location_id The configured pickup point id.
++         * @return object|null
++         */
++        public static function find_pickup_point( $location_id ) {
++            if ( null === $location_id || '' === $location_id ) {
++                return null;
++            }
++            foreach ( self::get_pickup_points_list() as $point ) {
++                if ( isset( $point->LocationId ) && (string) $point->LocationId === (string) $location_id ) { //phpcs:ignore
++                    return $point;
++                }
++            }
++            return null;
++        }
++
++        /**
++         * Normalise a ShippingCalculation answer to the price object.
++         *
++         * call_method() returns json_decode() output, so the answer is an
++         * object for a price, but a PHP array when the API answers with a
++         * JSON array: an error list such as ["Please send sender locality!"],
++         * or the price wrapped in a one-element list. Callers read
++         * $result->Subtotal directly, which raised "Attempt to read property
++         * on array" and evaluated to null.
++         *
++         * @since  1.6.0-fix
++         * @param  mixed $result The value returned by get_shipping_calulation().
++         * @return object|null   The price object, or null when the answer is not a price.
++         */
++        public static function normalize_shipping_calculation( $result ) {
++            $is_price = function ( $candidate ) {
++                if ( is_object( $candidate ) ) {
++                    return property_exists( $candidate, 'Subtotal' ) || property_exists( $candidate, 'GrandTotal' );
++                }
++                if ( is_array( $candidate ) ) {
++                    return array_key_exists( 'Subtotal', $candidate ) || array_key_exists( 'GrandTotal', $candidate );
++                }
++                return false;
++            };
++
++            if ( $is_price( $result ) ) {
++                return (object) $result;
++            }
++
++            if ( is_array( $result ) && ! empty( $result ) ) {
++                $first = reset( $result );
++                if ( $is_price( $first ) ) {
++                    return (object) $first;
++                }
++            }
++
++            return null;
++        }
++
++        /**
++         * Describe an API answer that is not the expected value, for logs and notes.
++         *
++         * @since  1.6.0-fix
++         * @param  mixed $result The API answer.
++         * @return string
++         */
++        public static function describe_api_error( $result ) {
++            if ( is_string( $result ) ) {
++                return $result;
++            }
++            if ( null === $result ) {
++                return 'no answer from the Cargus API';
++            }
++            $json = wp_json_encode( $result );
++            return false === $json ? 'unexpected answer from the Cargus API' : $json;
++        }
++
+         /**
+          * Call cargus shipping calculation api endpoint.
+          *
+diff --git a/admin/class-cargus-shipping-method.php b/admin/class-cargus-shipping-method.php
+index fdc9152..79b01f0 100644
+--- a/admin/class-cargus-shipping-method.php
++++ b/admin/class-cargus-shipping-method.php
+@@ -188,8 +188,18 @@ if ( ! class_exists( 'Cargus_Shipping_Method' ) ) {
+ 			}
+ 
+ 			// get the new cargus pickup locations and price tables.
+-			$this->api->get_pickup_locations( true );
+-			$this->api->get_price_tables( true );
++			// $this->api is only set above when the webservice URL and API key
++			// are both in the submitted form; saving the method with either
++			// empty (or from a screen that does not post them) was a fatal
++			// "Call to a member function get_pickup_locations() on null".
++			if ( ! ( $this->api instanceof Cargus_Api ) ) {
++				$this->api = Cargus_Api::get_instance();
++			}
++
++			if ( $this->api instanceof Cargus_Api ) {
++				$this->api->get_pickup_locations( true );
++				$this->api->get_price_tables( true );
++			}
+ 		}
+ 
+ 		/**
+@@ -236,7 +246,7 @@ if ( ! class_exists( 'Cargus_Shipping_Method' ) ) {
+ 		public function init_extra_fields() {
+ 			// obtine lista punctelor de ridicare.
+ 			global $pagenow;
+-			if ( 'admin.php' === $pagenow && 'wc-settings' === $_GET['page'] ) {
++			if ( 'admin.php' === $pagenow && isset( $_GET['page'] ) && 'wc-settings' === $_GET['page'] ) { //phpcs:ignore
+ 				$this->api = Cargus_Api::get_instance();
+ 
+ 				// obtine lista puncte de ridicare.
+@@ -603,8 +613,11 @@ if ( ! class_exists( 'Cargus_Shipping_Method' ) ) {
+ 					$total = WC()->cart->cart_contents_total + array_sum( WC()->cart->get_cart_contents_taxes() );
+ 
+ 					// Get ramburs.
+-					$ramburs = $total;
+-					if ( ! in_array( $current_payment_gateway->id, array( 'cod', 'cargus_ship_and_go_payment' ), true ) ) {
++					// current() returns false when no gateway is available yet
++					// (e.g. the cart is recalculated before gateways load).
++					$current_gateway_id = is_object( $current_payment_gateway ) && isset( $current_payment_gateway->id ) ? $current_payment_gateway->id : '';
++					$ramburs            = $total;
++					if ( ! in_array( $current_gateway_id, array( 'cod', 'cargus_ship_and_go_payment' ), true ) ) {
+ 						$ramburs = 0;
+ 					}
+ 
+@@ -736,9 +749,14 @@ if ( ! class_exists( 'Cargus_Shipping_Method' ) ) {
+ 
+ 					$fields = Cargus_Admin::get_service_id( $service, $fields, $weight );
+ 
+-					$result = $cargus->get_shipping_calulation( $fields );
++					$raw    = $cargus->get_shipping_calulation( $fields );
++					$result = Cargus_Api::normalize_shipping_calculation( $raw );
+ 
+-					if ( is_null( $result ) || 'error' === $result || ( is_array( $result ) && 'Please send sender locality!' === $result[0] ) || ( is_object( $result ) && property_exists( $result, 'Error' ) ) ) {
++					// Not a price (error list, Error object, no answer): no rate.
++					// Previously an error *array* fell through, $result->Subtotal
++					// read as null and the rate was offered as 0, i.e. free.
++					if ( null === $result || ( property_exists( $result, 'Error' ) ) ) {
++						$debugger->log( 'Cargus shipping calculation did not return a price: ' . Cargus_Api::describe_api_error( $raw ) );
+ 						return null;
+ 					}
+ 
+diff --git a/includes/class-cargus.php b/includes/class-cargus.php
+index 155f45d..b87d8e4 100644
+--- a/includes/class-cargus.php
++++ b/includes/class-cargus.php
+@@ -160,8 +160,13 @@ class Cargus {
+ 
+ 		if ( in_array( 'woocommerce/woocommerce.php', apply_filters( 'active_plugins', get_option( 'active_plugins' ) ), true ) ) {
+ 
+-			// start the session.
+-			$this->loader->add_action( 'init', $plugin_admin, 'cargus_start_session', 1 );
++			// The session is no longer started on every request (init). It
++			// produced "session_start(): Session cannot be started after
++			// headers have already been sent" on every request where output
++			// had already begun, and a PHPSESSID cookie on every page, which
++			// makes full-page caches skip the page. Cargus_Api opens the
++			// session itself, only when it needs it, and only if headers
++			// have not been sent yet.
+ 
+ 			// cargus enqueue admin scripts.
+ 			$this->loader->add_action( 'admin_enqueue_scripts', $plugin_admin, 'cargus_enqueue_scripts' );
+@@ -286,6 +291,7 @@ class Cargus {
+ 		$this->loader->add_filter( 'woocommerce_billing_fields', $plugin_public, 'cargus_load_default_data_billing_fields', 999, 1 );
+ 		$this->loader->add_filter( 'woocommerce_shipping_fields', $plugin_public, 'cargus_load_default_data_shipping_fields', 999, 1 );
+ 		$this->loader->add_filter( 'woocommerce_checkout_update_order_review', $plugin_public, 'cargus_checkout_update_order_review' );
++		$this->loader->add_filter( 'woocommerce_checkout_posted_data', $plugin_public, 'cargus_compose_address_from_street', 20, 1 );
+ 
+ 		// disable cargus shipping methods and payment gateway if client outside RO.
+ 		$this->loader->add_filter( 'woocommerce_available_payment_gateways', $plugin_public, 'cargus_disable_payment_gateway' );
+diff --git a/public/class-cargus-public.php b/public/class-cargus-public.php
+index 0e4d295..eff8870 100644
+--- a/public/class-cargus-public.php
++++ b/public/class-cargus-public.php
+@@ -278,13 +278,16 @@ class Cargus_Public {
+ 			wp_die( 'Nonce verification failed' );
+ 		}
+ 
++		// Always defined, so the answer is valid JSON even for a text field.
++		$options = array();
+ 		if ( isset( $_POST['type'] ) && 'SELECT' === $_POST['type'] ) {
+ 			$options = array( '-' => array( '0', null ) );
+ 		}
+ 
+ 		if ( isset( $_POST['judet'] ) && '' !== $_POST['judet'] ) {
+ 			// generez options pentru dropdown.
+-			$cargus       = Cargus_Api::get_instance();
++			// (No Cargus_Api instance needed: localities come from the cache,
++			// and creating one opened a PHP session on every lookup.)
+ 			$cargus_token = get_option( 'cargus_login_token' );
+ 
+ 			if ( $cargus_token && ! is_array( $cargus_token ) && ! is_object( $cargus_token ) ) {
+@@ -305,6 +308,10 @@ class Cargus_Public {
+ 					}
+ 				}
+ 				echo wp_json_encode( $options );
++			} else {
++				// No API token: answer with the empty list instead of an empty
++				// body, so the checkout falls back to a typed locality.
++				echo wp_json_encode( $options );
+ 			}
+ 
+ 			wp_die();
+@@ -428,21 +435,38 @@ class Cargus_Public {
+ 			wp_die( 'Nonce verification failed' );
+ 		}
+ 
+-		$cargus       = Cargus_Api::get_instance();
++		// No Cargus_Api instance here: it was unused and opened a PHP
++		// session on every keystroke of the street search.
+ 		$cargus_token = get_option( 'cargus_login_token' );
+ 
++		// Always answer with JSON. Without a token, or for a locality with no
++		// street list, the answer used to be an empty body ("0" from
++		// admin-ajax) or "null", which the checkout script could not parse.
++		// An empty array tells it to let the customer type the street.
++		if ( ! $cargus_token || is_array( $cargus_token ) || is_object( $cargus_token ) ) {
++			wp_die( '[]' );
++		}
++
+ 		if ( $cargus_token && ! is_array( $cargus_token ) && ! is_object( $cargus_token ) ) {
+ 			// obtin lista de judete din fisier json.
+ 			$cargus_cache = new Cargus_Cache();
+-			if ( isset( $_POST['city'] ) && '' !== $_POST['city'] ) {
++			if ( isset( $_POST['city'] ) && '' !== $_POST['city'] && is_numeric( $_POST['city'] ) ) {
+ 				$streets = $cargus_cache->get_streets( sanitize_text_field( wp_unslash( $_POST['city'] ) ) );
+ 				$options = array();
++				$decoded = json_decode( $streets );
++
++				// Street names in the Cargus list have no diacritics; customers
++				// type them ("Căpșunilor"), so compare without.
++				$search = isset( $_POST['q'] ) ? strtolower( remove_accents( sanitize_text_field( wp_unslash( $_POST['q'] ) ) ) ) : null;
+ 
+-				if ( '"No street retrieved!"' !== $streets ) {
++				if ( '"No street retrieved!"' !== $streets && is_array( $decoded ) ) {
+ 					// generez options pentru dropdown.
+-					foreach ( json_decode( $streets ) as $street ) {
++					foreach ( $decoded as $street ) {
++						if ( ! is_object( $street ) || ! isset( $street->Name ) ) { //phpcs:ignore
++							continue;
++						}
+ 						$street_name = str_replace( ', Strada', '', $street->Name ); //phpcs:ignore
+-						if ( isset( $_POST['q'] ) && strpos( strtolower( $street_name ), strtolower( sanitize_text_field( wp_unslash( $_POST['q'] ) ) ) ) !== false ) {
++						if ( null !== $search && '' !== $search && strpos( strtolower( remove_accents( $street_name ) ), $search ) !== false ) {
+ 							$options[] = array(
+ 								'StreetName'    => $street_name,
+ 								'StreetId'      => $street->StreetId, //phpcs:ignore
+@@ -463,8 +487,10 @@ class Cargus_Public {
+ 					}
+ 					echo wp_json_encode( $options );
+ 				} else {
+-					echo 'null';
++					echo '[]';
+ 				}
++			} else {
++				echo '[]';
+ 			}
+ 			wp_die();
+ 		}
+@@ -822,7 +848,9 @@ class Cargus_Public {
+ 			if ( isset( $cargus_options['street-select'] ) && 'yes' === $cargus_options['street-select'] ) {
+ 				$fields['street'] = array(
+ 					'label'       => __( 'Strada', 'cargus' ),
+-					'placeholder' => __( 'Unirii', 'cargus' ),
++					// An example, not a value: a bare "Unirii" / "1" in the
++					// field reads as already filled in, so customers skipped it.
++					'placeholder' => __( 'ex: Unirii', 'cargus' ),
+ 					'required'    => true,
+ 					'class'       => array( 'form-row-wide', 'address-field' ),
+ 					'clear'       => true,
+@@ -838,7 +866,7 @@ class Cargus_Public {
+ 
+ 				$fields['street_number'] = array(
+ 					'label'       => __( 'Numar', 'cargus' ),
+-					'placeholder' => __( '1', 'cargus' ),
++					'placeholder' => __( 'ex: 12', 'cargus' ),
+ 					'required'    => true,
+ 					'class'       => array( 'form-row-wide', 'address-field' ),
+ 					'clear'       => true,
+@@ -847,8 +875,11 @@ class Cargus_Public {
+ 				);
+ 
+ 				if ( WC()->session ) {
+-					if ( WC()->session->get( 'street_number' ) ) {
+-						$fields['street']['default'] = WC()->session->get( 'street_number' );
++					// The session key is billing_street_number (see
++					// cargus_checkout_update_order_review); it used to read
++					// "street_number" and write the number into the street.
++					if ( WC()->session->get( 'billing_street_number' ) ) {
++						$fields['street_number']['default'] = WC()->session->get( 'billing_street_number' );
+ 					}
+ 				}
+ 			}
+@@ -917,6 +948,43 @@ class Cargus_Public {
+ 		return $fields;
+ 	}
+ 
++	/**
++	 * Fill address_1 from the street and street number fields on the server.
++	 *
++	 * With the street fields enabled, address_1 is hidden on the checkout and
++	 * filled in by cargus.js. If the script did not run (a JavaScript error
++	 * elsewhere on the page, a theme that removes select2, a blocked file),
++	 * address_1 arrived empty and WooCommerce rejected the order with a
++	 * "required" error for a field the customer cannot see. This only fills
++	 * address_1 when it is empty; a value set by the script is kept as is.
++	 *
++	 * @since 1.6.0-fix
++	 * @param array $data The posted checkout data.
++	 * @return array
++	 */
++	public function cargus_compose_address_from_street( $data ) {
++		$cargus_options = get_option( 'woocommerce_cargus_settings' );
++		if ( ! is_array( $data ) || ! isset( $cargus_options['street-select'] ) || 'yes' !== $cargus_options['street-select'] ) {
++			return $data;
++		}
++
++		foreach ( array( 'billing', 'shipping' ) as $section ) {
++			$country = isset( $data[ $section . '_country' ] ) ? $data[ $section . '_country' ] : '';
++			$street  = isset( $data[ $section . '_street' ] ) ? trim( (string) $data[ $section . '_street' ] ) : '';
++			$number  = isset( $data[ $section . '_street_number' ] ) ? trim( (string) $data[ $section . '_street_number' ] ) : '';
++
++			if ( 'RO' !== $country || '' === $street || '0' === $street ) {
++				continue;
++			}
++
++			if ( ! isset( $data[ $section . '_address_1' ] ) || '' === trim( (string) $data[ $section . '_address_1' ] ) ) {
++				$data[ $section . '_address_1' ] = $street . ( '' !== $number ? ', Nr. ' . $number : '' );
++			}
++		}
++
++		return $data;
++	}
++
+ 	/**
+ 	 * Set the deffault data for the new address custom fields.
+ 	 *
+@@ -1116,7 +1184,7 @@ class Cargus_Public {
+ 				foreach ( $counties as $county ) {
+ 					if ( trim( addslashes( sanitize_text_field( $_POST['judet'] ) ) ) === $county['Abbreviation'] ) { //phpcs:ignore
+ 						$localities = $cargus_cache->get_localities( $county['CountyId'] ); //phpcs:ignore
+-						foreach ( json_decode( $localities ) as $locality ) { //phpcs:ignore
++						foreach ( (array) json_decode( $localities ) as $locality ) { //phpcs:ignore
+ 							$options[ $locality->Name ] = array( $locality->InNetwork ? 0 : ( ! $locality->ExtraKm ? 0 : $locality->ExtraKm ), $locality->LocalityId, $locality->Name, $locality->PostalCode, $locality->SaturdayDelivery );//phpcs:ignore
+ 						}
+ 						break;
+@@ -1162,14 +1230,12 @@ class Cargus_Public {
+ 		// check if the locality id was sent.
+ 		if ( isset( $_POST['locality_id'] ) ) {
+ 			// check if the pickup point is from Bucharest.
+-			$cargus_options       = get_option( 'woocommerce_cargus_settings' );
+-			$cargus_pickup_points = get_option( 'cargus_pickup_points' );
+-			$sender_from_b        = false;
+-			foreach ( $cargus_pickup_points as $location ) {
+-				if ( $location->LocationId === intval( $cargus_options['pickup'] ) && 'Bucuresti' === $location->CountyName ) {
+-					$sender_from_b = true;
+-				}
+-			}
++			// The "cargus_pickup_points" option this read is not written by
++			// the plugin any more (false), so foreach() warned and the
++			// sender was never recognised as being in Bucharest.
++			$cargus_options = get_option( 'woocommerce_cargus_settings' );
++			$pickup_point   = Cargus_Api::find_pickup_point( isset( $cargus_options['pickup'] ) ? $cargus_options['pickup'] : null );
++			$sender_from_b  = $pickup_point && isset( $pickup_point->CountyName ) && 'Bucuresti' === $pickup_point->CountyName; //phpcs:ignore
+ 
+ 			$additional_delivery = array(
+ 				'pre10' => false,
+@@ -1180,9 +1246,10 @@ class Cargus_Public {
+ 			$cttd = file_get_contents( plugin_dir_path( __DIR__ ) . 'admin/locations/cttd.json' );
+ 			// Convert to array.
+ 			$cttd_array = json_decode( $cttd, true );
++			$cttd_rows  = ( is_array( $cttd_array ) && isset( $cttd_array['CountryTranzitTimeDestinatio'] ) && is_array( $cttd_array['CountryTranzitTimeDestinatio'] ) ) ? $cttd_array['CountryTranzitTimeDestinatio'] : array();
+ 
+ 			// loop through data and check if the pre10 ore pre12 delivery is available for the current locality.
+-			foreach ( $cttd_array['CountryTranzitTimeDestinatio'] as $location ) {
++			foreach ( $cttd_rows as $location ) {
+ 				if ( $location['IdOras'] === $_POST['locality_id'] ) {
+ 					if ( ( $sender_from_b && '1' === $location['Pre10FromB'] ) || ( ! $sender_from_b && '1' === $location['Pre10FromT'] ) ) {
+ 						$additional_delivery['pre10'] = true;
+diff --git a/public/js/cargus.js b/public/js/cargus.js
+index 17895ce..3a5427e 100644
+--- a/public/js/cargus.js
++++ b/public/js/cargus.js
+@@ -1,5 +1,64 @@
+ jQuery(function ($) {
+     let runningIndex = 0;
++
++    // select2/selectWoo is not guaranteed to be on the page: themes and
++    // optimisation plugins routinely dequeue it on the checkout. Every call
++    // to it goes through these helpers, so a missing library degrades to the
++    // native control instead of throwing and leaving the field empty.
++    const select2Method = function () {
++        if (typeof $.fn.select2 === 'function') {
++            return 'select2';
++        }
++        if (typeof $.fn.selectWoo === 'function') {
++            return 'selectWoo';
++        }
++        return null;
++    };
++
++    const enhanceSelect = function ($select, options) {
++        const method = select2Method();
++        if (method && $select.length) {
++            $select[method](options);
++            return true;
++        }
++        return false;
++    };
++
++    const destroySelect = function ($select) {
++        const method = select2Method();
++        if (method && $select.hasClass('select2-hidden-accessible')) {
++            $select[method]('destroy');
++        }
++    };
++
++    // Parse an admin-ajax answer that should be JSON. admin-ajax answers "0"
++    // or an empty body when the handler bailed out; treat that as "nothing".
++    const parseJson = function (data) {
++        if (typeof data !== 'string') {
++            return data;
++        }
++        try {
++            return JSON.parse(data);
++        } catch (e) {
++            return null;
++        }
++    };
++
++    // The element that carries the street-id / postal-numbers attributes:
++    // the selected <option> of a street <select>, or the street <input>.
++    const streetDataSource = function (section) {
++        const street = $('[name="' + section + '_street"]');
++        return street.prop('nodeName') === 'SELECT' ? street.find('option:selected') : street;
++    };
++
++    // Plain text street input, used whenever there is no usable street list.
++    const streetTextInput = function (attr_name, attr_id, attr_placeholder, value) {
++        return $('<input type="text" class="input-text" autocomplete="street-address" />').attr({
++            name: attr_name,
++            id: attr_id,
++            placeholder: attr_placeholder || null,
++        }).val(value || '');
++    };
+     // Replace the billing/sipping city field.
+     const filterStates = function (section, initialRun) {
+         initialRun = runningIndex === 0;
+@@ -31,9 +90,7 @@ jQuery(function ($) {
+                     element.replaceWith('<select class="' + attr_class + '" name="' + attr_name + '"  id="' + attr_id + '"><option elementValue km="0">-</option></select>');
+                 }
+ 
+-                if ($('select[name="' + attr_name + '"]').hasClass('select2-hidden-accessible')) {
+-                    $('select[name="' + attr_name + '"]').select2('destroy');
+-                }
++                destroySelect($('select[name="' + attr_name + '"]'));
+ 
+                 $.ajax({
+                     type: "POST",
+@@ -47,7 +104,24 @@ jQuery(function ($) {
+                         security: ajax_var.nonce,
+                     },
+                     success: function (data) {
+-                        data = JSON.parse(data);
++                        data = parseJson(data);
++
++                        // No locality list for this county (API down, empty
++                        // cache, no token): give the customer a text field
++                        // for the locality instead of a select with only "-".
++                        if (!data || typeof data !== 'object' || Object.keys(data).filter(function (k) { return k !== '-'; }).length === 0) {
++                            const citySelect = $('select[name="' + attr_name + '"]');
++                            destroySelect(citySelect);
++                            citySelect.replaceWith($('<input type="text" class="input-text" />').attr({
++                                name: attr_name,
++                                id: attr_id,
++                                placeholder: attr_placeholder || null,
++                                autocomplete: attr_autocomplete || 'address-level2',
++                            }).val(initialRun && elementValue && elementValue !== '-' ? elementValue : ''));
++                            $('[name="' + section + '_city"]').trigger('change', {'initial': initialRun});
++                            return;
++                        }
++
+                         for (const [key, value] of Object.entries(data)) {
+                             $('select[name="' + attr_name + '"]').append($("<option></option>").attr({
+                                 'km': value[0],
+@@ -65,9 +139,7 @@ jQuery(function ($) {
+ 
+                         if ($('[name="' + section + '_street"]').prop('nodeName') == 'SELECT') {
+                             $('[name="' + section + '_street"]').empty();
+-                            if ($('[name="' + section + '_street"]').hasClass('select2-hidden-accessible')) {
+-                                $('[name="' + section + '_street"]').select2('destroy');
+-                            }
++                            destroySelect($('[name="' + section + '_street"]'));
+                         } else {
+                             $('[name="' + section + '_street"]').val('');
+                         }
+@@ -77,8 +149,8 @@ jQuery(function ($) {
+                             $('[name="' + section + '_street_number"]').val('');
+                         }
+ 
+-                        // make city field select2.
+-                        $('select[name="' + attr_name + '"]').select2({
++                        // make city field select2 (stays a native select when select2 is not loaded).
++                        enhanceSelect($('select[name="' + attr_name + '"]'), {
+                             width: '100%'
+                         });
+ 
+@@ -97,7 +169,7 @@ jQuery(function ($) {
+                 if (type != 'INPUT') {
+                     if ($('[name="' + section + '_city"]').hasClass('select2-hidden-accessible')) {
+                         $('[name="' + section + '_city"]').empty();
+-                        $('[name="' + section + '_city"]').select2('destroy');
++                        destroySelect($('[name="' + section + '_city"]'));
+                     }
+ 
+                     $('[name="' + section + '_city"]').replaceWith('<input type="text" class="input-text" name="' + attr_name + '"  id="' + attr_id + '"' + (attr_placeholder ? ' placeholder="' + attr_placeholder + '"' : '') + ' autocomplete="' + attr_autocomplete + '" value="" />');
+@@ -106,7 +178,7 @@ jQuery(function ($) {
+                 if ($('[name="' + section + '_street"]').prop('nodeName') != 'INPUT') {
+                     if ($('[name="' + section + '_street"]').hasClass('select2-hidden-accessible')) {
+                         $('[name="' + section + '_street"]').empty();
+-                        $('[name="' + section + '_street"]').select2('destroy');
++                        destroySelect($('[name="' + section + '_street"]'));
+                     }
+ 
+                     $('[name="' + section + '_street"]').replaceWith('<input type="text" class="input-text" name="' + section + '_street"  id="' + section + '_street" value="" />');
+@@ -164,6 +236,90 @@ jQuery(function ($) {
+                 hideAddressField('shipping');
+             });
+ 
++            // Map a cargus_get_streets answer to select2 results. The answer
++            // can be "null", "0" or an empty body when the lookup failed.
++            const streetResults = function (data) {
++                if (!Array.isArray(data)) {
++                    return [];
++                }
++                return data.map(function (item) {
++                    return {
++                        id: item.StreetName,
++                        streetId: item.StreetId,
++                        text: item.StreetName,
++                        PostalNumbers: item.PostalNumbers
++                    };
++                });
++            };
++
++            // Native fallback for the street list when select2 is not loaded:
++            // a free-text input with a <datalist> of the matching streets.
++            // Whatever the customer types is accepted; when it matches a known
++            // street the street id and postal numbers are kept on the input so
++            // the postcode lookup and the AWB street id still work.
++            const attachStreetSuggestions = function (section) {
++                const input = $('input[name="' + section + '_street"]');
++                if (!input.length) {
++                    return;
++                }
++
++                const listId = input.attr('id') + '_list';
++                let list = $('#' + listId);
++                if (!list.length) {
++                    list = $('<datalist></datalist>').attr('id', listId);
++                    input.after(list);
++                }
++                input.attr('list', listId);
++
++                let known = {};
++                let timer = null;
++                let lastTerm = '';
++
++                const remember = function () {
++                    const match = known[$.trim(input.val()).toLowerCase()];
++                    if (match) {
++                        input.attr('street-id', match.StreetId);
++                        input.attr('postal-numbers', match.PostalNumbers);
++                    } else {
++                        input.removeAttr('street-id').removeAttr('postal-numbers');
++                    }
++                };
++
++                input.off('.cargusStreets').on('input.cargusStreets', function () {
++                    remember();
++                    const term = $.trim(input.val());
++                    if (term.length < 2 || term === lastTerm) {
++                        return;
++                    }
++                    clearTimeout(timer);
++                    timer = setTimeout(function () {
++                        lastTerm = term;
++                        $.ajax({
++                            type: 'POST',
++                            url: ajax_var.url,
++                            dataType: 'json',
++                            data: {
++                                q: term,
++                                action: 'cargus_get_streets',
++                                city: $('[name="' + section + '_city"]').find('option:selected').attr('locality-id'),
++                                security: ajax_var.nonce,
++                            },
++                            success: function (data) {
++                                list.empty();
++                                if (!Array.isArray(data)) {
++                                    return;
++                                }
++                                data.slice(0, 50).forEach(function (item) {
++                                    known[String(item.StreetName).toLowerCase()] = item;
++                                    list.append($('<option></option>').attr('value', item.StreetName));
++                                });
++                                remember();
++                            }
++                        });
++                    }, 200);
++                }).on('change.cargusStreets', remember);
++            };
++
+             // Replace the billing/shipping street field.
+             const filterCities = function (section, initialRun = false) {
+                 const street = $('[name="' + section + '_street"]');
+@@ -174,19 +330,30 @@ jQuery(function ($) {
+                 const attr_placeholder = street.attr('placeholder');
+ 
+                 const city = $('[name="' + section + '_city"]');
++                const cityIsSelect = city.prop('nodeName') === 'SELECT';
+                 const cityPostalCode = city.find('option:selected').attr('postal-code');
++                const cityLocalityId = city.find('option:selected').attr('locality-id');
++
++                // Streets can only be looked up for a locality picked from the
++                // Cargus list (a select with a locality id). A typed locality has
++                // no street list, so the street is free text.
++                const cityHasStreetList = cityIsSelect && cityLocalityId !== undefined && cityLocalityId !== '' &&
++                    jQuery.inArray(cityPostalCode, [undefined, '0', 'NULL']) !== -1;
+ 
+-                if (street != null && $('[name="' + section + '_country"]').val() == 'RO') {
+-                    if (street.hasClass('select2-hidden-accessible') && street.prop('nodeName') == 'SELECT') {
++                if (street.length && $('[name="' + section + '_country"]').val() == 'RO') {
++                    destroySelect(street);
++                    if (street.prop('nodeName') == 'SELECT') {
+                         street.empty();
+-                        street.select2('destroy');
+                     }
+-                    if (jQuery.inArray(cityPostalCode, [undefined, '0', 'NULL']) !== -1) {
+-                        if (street.prop('nodeName') != 'SELECT') {
+-                            street.replaceWith('<select class="' + attr_class + '" name="' + attr_name + '"  id="' + attr_id + '"></select>');
++
++                    if (cityHasStreetList && select2Method()) {
++                        let streetSelect = $('[name="' + section + '_street"]');
++                        if (streetSelect.prop('nodeName') != 'SELECT') {
++                            streetSelect.replaceWith('<select class="' + attr_class + '" name="' + attr_name + '"  id="' + attr_id + '"></select>');
++                            streetSelect = $('select[name="' + section + '_street"]');
+                         }
+ 
+-                        $('select[name="' + section + '_street"]').select2({
++                        enhanceSelect(streetSelect, {
+                             language: {
+                                 searching: function () {
+                                     return "Procesare...";
+@@ -216,17 +383,22 @@ jQuery(function ($) {
+                                         type: type,
+                                     };
+                                 },
+-                                processResults: function (data) {
+-                                    let res = data.map(function (item) {
+-                                        return {
+-                                            id: item.StreetName,
+-                                            streetId: item.StreetId,
+-                                            text: item.StreetName,
+-                                            PostalNumbers: item.PostalNumbers
+-                                        };
++                                processResults: function (data, params) {
++                                    const results = streetResults(data);
++                                    // A street that is missing from the Cargus list
++                                    // (or a locality whose list is empty) can still
++                                    // be entered as typed. It is offered after the
++                                    // known streets, so the first match stays the
++                                    // highlighted one.
++                                    const term = $.trim((params && params.term) || '');
++                                    const exists = results.some(function (r) {
++                                        return String(r.text).toLowerCase() === term.toLowerCase();
+                                     });
++                                    if (term.length >= 2 && !exists) {
++                                        results.push({id: term, text: term});
++                                    }
+                                     return {
+-                                        results: res
++                                        results: results
+                                     };
+                                 },
+                                 cache: true
+@@ -237,10 +409,14 @@ jQuery(function ($) {
+                             templateResult: formatOption,
+                             templateSelection: formatOptionSelection,
+                             width: '100%',
+-                        }).on('change', function (e) {
+-                            if ($(this).select2('data')[0].PostalNumbers) {
+-                                $(this).find('option:selected').attr('postal-numbers', $(this).select2('data')[0].PostalNumbers);
+-                                $(this).find('option:selected').attr('street-id', $(this).select2('data')[0].streetId);
++                        });
++
++                        streetSelect.off('change.cargus').on('change.cargus', function (e) {
++                            const selected = $(this)[select2Method()]('data')[0];
++                            const option = $(this).find('option:selected');
++                            if (selected && selected.PostalNumbers) {
++                                option.attr('postal-numbers', selected.PostalNumbers);
++                                option.attr('street-id', selected.streetId);
+                             }
+                         });
+ 
+@@ -249,8 +425,21 @@ jQuery(function ($) {
+                         }
+ 
+                     } else {
+-                        street.replaceWith('<input type="text" class="input-text" name="' + attr_name + '"  id="' + attr_id + '"' + (attr_placeholder ? ' placeholder="' + attr_placeholder + '"' : '') + ' autocomplete="street" value="" />');
+-                        $('[name="' + section + '_postcode"]').val($('[name="' + section + '_city"]').find('option:selected').attr('postal-code'));
++                        const currentStreet = $('[name="' + section + '_street"]');
++                        currentStreet.replaceWith(streetTextInput(attr_name, attr_id, attr_placeholder, ''));
++
++                        if (cityHasStreetList) {
++                            // select2 is not available: native input + suggestions.
++                            attachStreetSuggestions(section);
++                            if (!initialRun) {
++                                $('[name="' + section + '_postcode"]').val('');
++                            }
++                        } else {
++                            $('#' + attr_id + '_list').remove();
++                            if (cityIsSelect && cityPostalCode !== undefined && jQuery.inArray(cityPostalCode, ['0', 'NULL']) === -1) {
++                                $('[name="' + section + '_postcode"]').val(cityPostalCode);
++                            }
++                        }
+                     }
+ 
+                     if (!initialRun) {
+@@ -259,8 +448,8 @@ jQuery(function ($) {
+ 
+                     function formatOption(city) {
+                         let $container = $(
+-                            "<div class='select2-result-title'>" + city.text + "</div>"
+-                        );
++                            "<div class='select2-result-title'></div>"
++                        ).text(city.text);
+ 
+                         return $container;
+                     }
+@@ -269,7 +458,7 @@ jQuery(function ($) {
+                         return city.text;
+                     }
+                 } else {
+-                    street.replaceWith('<input type="text" class="input-text" name="' + attr_name + '"  id="' + attr_id + '"' + (attr_placeholder ? ' placeholder="' + attr_placeholder + '"' : '') + ' autocomplete="street" value="" />');
++                    street.replaceWith(streetTextInput(attr_name, attr_id, attr_placeholder, ''));
+                 }
+             }
+ 
+@@ -375,17 +564,35 @@ jQuery(function ($) {
+ 
+             // Add and select the default value if there is one.
+             const streetAddAjaxOption = function (section, params) {
++                const streetName = params && params.streetName;
++                if (!streetName || streetName === '0') {
++                    return;
++                }
++
++                // Free-text street (no street list, or no select2): restore the
++                // saved value as typed.
++                if ($('[name="' + section + '_street"]').prop('nodeName') !== 'SELECT') {
++                    $('[name="' + section + '_street"]').val(streetName).trigger('change');
++                    return;
++                }
++
+                 $.ajax({
+                     type: "POST",
+                     url: ajax_var.url,
+                     dataType: 'json',
+                     data: {
+                         action: 'cargus_get_streets',
+-                        city: $('[name="billing_city"]').find('option:selected').attr('locality-id'),
++                        city: $('[name="' + section + '_city"]').find('option:selected').attr('locality-id'),
+                         security: ajax_var.nonce,
+-                        val: params.streetName
++                        val: streetName
+                     },
+                     success: function (data) {
++                        if ( ! Array.isArray(data) || ! data.length ) {
++                            // Saved street is not in the Cargus list: keep it as typed.
++                            const option = new Option(String(streetName).replace(/^Str\. /, ''), String(streetName).replace(/^Str\. /, ''), true, true);
++                            $('[name="' + section + '_street"]').append(option).trigger('change');
++                            return;
++                        }
+                         if ( null !== data ) {
+                             const option = new Option(data[0].StreetName, data[0].StreetName, true, true);
+                             $('[name="' + section + '_street"]').append(option);
+@@ -422,9 +629,9 @@ jQuery(function ($) {
+                     return true;
+                 }
+ 
+-                const postalNumbers = $('[name="' + section + '_street"]').find('option:selected').attr('postal-numbers');
++                const postalNumbers = streetDataSource(section).attr('postal-numbers');
+ 
+-                if (postalNumbers != undefined) {
++                if (postalNumbers != undefined && !isNaN(strNumber)) {
+                     let noFound = 0;
+                     let indexes = [];
+                     $.each(JSON.parse(postalNumbers), function (key, value) {
+@@ -495,17 +702,24 @@ jQuery(function ($) {
+ 
+             // Set the shipping/billing address 1 value function.
+             const setAddressValue = function (section) {
+-                if ('' != $('[name="' + section + '_street"]').val()) {
+-                    if ('SELECT' == $('[name="' + section + '_street"]').prop('nodeName')) {
+-                        $('[name="' + section + '_address_1"]').val('Str. ' + $('[name="' + section + '_street"] option:selected').text());
+-                    } else {
+-                        $('[name="' + section + '_address_1"]').val($('[name="' + section + '_street"]').val());
+-                    }
++                const street = $('[name="' + section + '_street"]');
++                const streetValue = $.trim(street.val() || '');
++                const numberValue = $.trim($('[name="' + section + '_street_number"]').val() || '');
++
++                // Rebuilt from scratch every time, so repeated blurs do not keep
++                // appending ", Nr. ..." to the previous value.
++                if ('' === streetValue) {
++                    return;
+                 }
+ 
+-                if ('' != $('[name="' + section + '_street_number"]').val()) {
+-                    $('[name="' + section + '_address_1"]').val($('[name="' + section + '_address_1"]').val() + ', Nr. ' + $('[name="' + section + '_street_number"]').val());
++                // "Str. " only for a street picked from the Cargus list; a street
++                // typed by the customer is used exactly as typed.
++                const picked = 'SELECT' == street.prop('nodeName') ? street.find('option:selected') : $();
++                let address = (picked.length && picked.attr('street-id') !== undefined) ? 'Str. ' + $.trim(picked.text()) : streetValue;
++                if ('' !== numberValue) {
++                    address += ', Nr. ' + numberValue;
+                 }
++                $('[name="' + section + '_address_1"]').val(address);
+             }
+ 
+             // Set the shipping/billing address 1 value function.
+@@ -514,15 +728,30 @@ jQuery(function ($) {
+                 setAddressValue('shipping');
+             });
+ 
++            // WooCommerce serialises the form in its own submit handler, which
++            // runs before the delegated submit handler above. checkout_place_order
++            // fires before that serialisation, so address_1 is current when sent.
++            $('form.checkout').on('checkout_place_order', function () {
++                setAddressValue('billing');
++                setAddressValue('shipping');
++                return true;
++            });
++
+             // Add Street ID to form data.
+             const sendStreetId = function (section) {
+-                const street = $('#' + section + '_street')
+-                if (street.prop('nodeName') === 'SELECT') {
+-                    const streetId = street.find('option:selected').attr('street-id');
+-
+-                    $('[name="checkout"]').append("<input type='hidden' name='" + section + "_street_id' value='" + streetId + "' />");
+-                } else if ( street.prop('nodeName') !== 'SELECT' && $( 'input[name="'+section+'_street_id"]' ).length ) {
+-                    $( 'input[name="'+section+'_street_id"]' ).remove();
++                const streetId = streetDataSource(section).attr('street-id');
++                const hidden = $('input[name="' + section + '_street_id"]');
++
++                // Only a street picked from the Cargus list has an id. A typed
++                // street must not send a stale id or the string "undefined".
++                if (streetId !== undefined && /^[0-9]+$/.test(String(streetId))) {
++                    if (hidden.length) {
++                        hidden.val(streetId);
++                    } else {
++                        $('[name="checkout"]').append($("<input type='hidden' />").attr({name: section + '_street_id', value: streetId}));
++                    }
++                } else if (hidden.length) {
++                    hidden.remove();
+                 }
+ 
+                 return true;
