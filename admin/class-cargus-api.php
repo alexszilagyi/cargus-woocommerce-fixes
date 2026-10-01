@@ -744,6 +744,62 @@ if ( ! class_exists( 'Cargus_Api' ) ) {
         }
 
         /**
+         * The sender pickup points, as a list.
+         *
+         * Several callers read get_option( 'cargus_pickup_points' ), an option
+         * that nothing in the current plugin writes any more, so it is false
+         * on every install made with a recent version and foreach() over it
+         * warned. The pickup points come from the PickupLocations endpoint,
+         * cached in a transient by get_pickup_locations(); the old option is
+         * still used first when a site has it.
+         *
+         * @since  1.6.0-fix
+         * @return array List of pickup point objects (possibly empty).
+         */
+        public static function get_pickup_points_list() {
+            $points = get_option( 'cargus_pickup_points' );
+
+            if ( empty( $points ) || ! is_array( $points ) ) {
+                $points = self::get_instance()->get_pickup_locations();
+            }
+
+            if ( ! is_array( $points ) ) {
+                return array();
+            }
+
+            return array_values(
+                array_filter(
+                    array_map(
+                        function ( $point ) {
+                            return is_array( $point ) ? (object) $point : $point;
+                        },
+                        $points
+                    ),
+                    'is_object'
+                )
+            );
+        }
+
+        /**
+         * The pickup point with the given LocationId, or null.
+         *
+         * @since  1.6.0-fix
+         * @param  int|string $location_id The configured pickup point id.
+         * @return object|null
+         */
+        public static function find_pickup_point( $location_id ) {
+            if ( null === $location_id || '' === $location_id ) {
+                return null;
+            }
+            foreach ( self::get_pickup_points_list() as $point ) {
+                if ( isset( $point->LocationId ) && (string) $point->LocationId === (string) $location_id ) { //phpcs:ignore
+                    return $point;
+                }
+            }
+            return null;
+        }
+
+        /**
          * Normalise a ShippingCalculation answer to the price object.
          *
          * call_method() returns json_decode() output, so the answer is an

@@ -1189,7 +1189,8 @@ class Cargus_Admin {
 						}
 
 						if ( get_post_meta( $order_id, 'cargus_continut_colet', true ) ) {
-							foreach ( unserialize( get_post_meta( $order_id, 'cargus_continut_colet', true ) )[ $i ] as $product_id ) {
+							$parcel_products = self::cargus_meta_list( $order_id, 'cargus_continut_colet' );
+							foreach ( (array) ( $parcel_products[ $i ] ?? array() ) as $product_id ) {
 								$product        = wc_get_product( $product_id );
 								$parcel_content = array();
 								if ( 'product-title' === $cargus_options['parcel_contents'] ) {
@@ -2141,14 +2142,23 @@ class Cargus_Admin {
 			$slug = 'shop_order';
 			if ( is_admin() && $slug === $post->post_type ) {
 				$cargus_options = get_option( 'woocommerce_cargus_settings' );
-				$cargus_pickup_points = get_option( 'cargus_pickup_points' );
 
 				$debugger->info( 'Check dynamic price for order: ' . $post_id );
 
-				foreach ( $cargus_pickup_points as $pickup ) {
-					if ( $pickup->LocationId == $cargus_options['pickup'] ) {
-						$location['locality_id'] = $pickup->LocalityId;
+				// "cargus_pickup_points" is no longer written by the plugin, so
+				// this loop ran over false and $location was never defined.
+				$pickup   = Cargus_Api::find_pickup_point( isset( $cargus_options['pickup'] ) ? $cargus_options['pickup'] : null );
+				$location = array();
+				if ( $pickup && isset( $pickup->LocalityId ) ) { //phpcs:ignore
+					$location['locality_id'] = $pickup->LocalityId; //phpcs:ignore
+				}
+
+				if ( empty( $location['locality_id'] ) ) {
+					$order = wc_get_order( $post_id );
+					if ( $order ) {
+						$order->add_order_note( 'Dynamic Cargus Shipping Price Calculation failed: the pickup point selected in the Cargus settings was not found. Save the Cargus settings again to refresh the pickup points.' );
 					}
+					return;
 				}
 
 				$cargus = Cargus_Api::get_instance();

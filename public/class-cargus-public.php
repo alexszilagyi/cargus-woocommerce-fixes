@@ -1184,7 +1184,7 @@ class Cargus_Public {
 				foreach ( $counties as $county ) {
 					if ( trim( addslashes( sanitize_text_field( $_POST['judet'] ) ) ) === $county['Abbreviation'] ) { //phpcs:ignore
 						$localities = $cargus_cache->get_localities( $county['CountyId'] ); //phpcs:ignore
-						foreach ( json_decode( $localities ) as $locality ) { //phpcs:ignore
+						foreach ( (array) json_decode( $localities ) as $locality ) { //phpcs:ignore
 							$options[ $locality->Name ] = array( $locality->InNetwork ? 0 : ( ! $locality->ExtraKm ? 0 : $locality->ExtraKm ), $locality->LocalityId, $locality->Name, $locality->PostalCode, $locality->SaturdayDelivery );//phpcs:ignore
 						}
 						break;
@@ -1230,14 +1230,12 @@ class Cargus_Public {
 		// check if the locality id was sent.
 		if ( isset( $_POST['locality_id'] ) ) {
 			// check if the pickup point is from Bucharest.
-			$cargus_options       = get_option( 'woocommerce_cargus_settings' );
-			$cargus_pickup_points = get_option( 'cargus_pickup_points' );
-			$sender_from_b        = false;
-			foreach ( $cargus_pickup_points as $location ) {
-				if ( $location->LocationId === intval( $cargus_options['pickup'] ) && 'Bucuresti' === $location->CountyName ) {
-					$sender_from_b = true;
-				}
-			}
+			// The "cargus_pickup_points" option this read is not written by
+			// the plugin any more (false), so foreach() warned and the
+			// sender was never recognised as being in Bucharest.
+			$cargus_options = get_option( 'woocommerce_cargus_settings' );
+			$pickup_point   = Cargus_Api::find_pickup_point( isset( $cargus_options['pickup'] ) ? $cargus_options['pickup'] : null );
+			$sender_from_b  = $pickup_point && isset( $pickup_point->CountyName ) && 'Bucuresti' === $pickup_point->CountyName; //phpcs:ignore
 
 			$additional_delivery = array(
 				'pre10' => false,
@@ -1248,9 +1246,10 @@ class Cargus_Public {
 			$cttd = file_get_contents( plugin_dir_path( __DIR__ ) . 'admin/locations/cttd.json' );
 			// Convert to array.
 			$cttd_array = json_decode( $cttd, true );
+			$cttd_rows  = ( is_array( $cttd_array ) && isset( $cttd_array['CountryTranzitTimeDestinatio'] ) && is_array( $cttd_array['CountryTranzitTimeDestinatio'] ) ) ? $cttd_array['CountryTranzitTimeDestinatio'] : array();
 
 			// loop through data and check if the pre10 ore pre12 delivery is available for the current locality.
-			foreach ( $cttd_array['CountryTranzitTimeDestinatio'] as $location ) {
+			foreach ( $cttd_rows as $location ) {
 				if ( $location['IdOras'] === $_POST['locality_id'] ) {
 					if ( ( $sender_from_b && '1' === $location['Pre10FromB'] ) || ( ! $sender_from_b && '1' === $location['Pre10FromT'] ) ) {
 						$additional_delivery['pre10'] = true;
