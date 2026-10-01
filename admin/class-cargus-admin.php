@@ -153,7 +153,9 @@ class Cargus_Admin {
 	 * @since    1.5.2
 	 */
 	public function cargus_start_session(): void {
-		if ( session_status() === PHP_SESSION_NONE ) {
+		// No longer hooked on init; kept for code that calls it directly.
+		// session_start() after output has begun only raises a warning.
+		if ( session_status() === PHP_SESSION_NONE && ! headers_sent() ) {
 			session_start(); // Start the session if it's not already started.
 		}
 		// Close the session immediately to avoid REST API/loopback interference

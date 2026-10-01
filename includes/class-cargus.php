@@ -160,8 +160,13 @@ class Cargus {
 
 		if ( in_array( 'woocommerce/woocommerce.php', apply_filters( 'active_plugins', get_option( 'active_plugins' ) ), true ) ) {
 
-			// start the session.
-			$this->loader->add_action( 'init', $plugin_admin, 'cargus_start_session', 1 );
+			// The session is no longer started on every request (init). It
+			// produced "session_start(): Session cannot be started after
+			// headers have already been sent" on every request where output
+			// had already begun, and a PHPSESSID cookie on every page, which
+			// makes full-page caches skip the page. Cargus_Api opens the
+			// session itself, only when it needs it, and only if headers
+			// have not been sent yet.
 
 			// cargus enqueue admin scripts.
 			$this->loader->add_action( 'admin_enqueue_scripts', $plugin_admin, 'cargus_enqueue_scripts' );

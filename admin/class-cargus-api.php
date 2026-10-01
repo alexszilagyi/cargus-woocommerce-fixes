@@ -165,8 +165,9 @@ if ( ! class_exists( 'Cargus_Api' ) ) {
         public static function get_instance( $url = '', $key = '' ) {
             // Ensure session is available for operations
             if ( ! self::ensure_session_active() ) {
-                // If session cannot be started, return instance without session operations
-                if ( self::$instance === null ) {
+                // If session cannot be started, return instance without session operations.
+                // Explicit credentials (settings save) must still replace the instance.
+                if ( self::$instance === null || ( $url !== '' && $key !== '' ) ) {
                     self::$instance = new self( $url, $key );
                 }
                 return self::$instance;
@@ -197,8 +198,12 @@ if ( ! class_exists( 'Cargus_Api' ) ) {
          * @return mixed The property value or null if not set.
          */
         private function get_instance_property( string $property ) {
+            // Without a session (headers already sent, CLI, cron, REST) the
+            // values on this instance are the ones loaded from the settings.
+            // Returning null here made get_api_key() empty and switched
+            // Ship & Go off for that request and skipped the token refresh cron.
             if ( ! self::ensure_session_active() ) {
-                return null;
+                return $this->$property ?? null;
             }
 
             if ( isset( $_SESSION['cargus_api_instance'] ) ) {
@@ -208,7 +213,9 @@ if ( ! class_exists( 'Cargus_Api' ) ) {
                 self::close_session_safely();
                 return $value;
             }
-            return null;
+
+            self::close_session_safely();
+            return $this->$property ?? null;
         }
 
         /**

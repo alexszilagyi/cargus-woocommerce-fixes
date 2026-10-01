@@ -286,7 +286,8 @@ class Cargus_Public {
 
 		if ( isset( $_POST['judet'] ) && '' !== $_POST['judet'] ) {
 			// generez options pentru dropdown.
-			$cargus       = Cargus_Api::get_instance();
+			// (No Cargus_Api instance needed: localities come from the cache,
+			// and creating one opened a PHP session on every lookup.)
 			$cargus_token = get_option( 'cargus_login_token' );
 
 			if ( $cargus_token && ! is_array( $cargus_token ) && ! is_object( $cargus_token ) ) {
@@ -434,7 +435,8 @@ class Cargus_Public {
 			wp_die( 'Nonce verification failed' );
 		}
 
-		$cargus       = Cargus_Api::get_instance();
+		// No Cargus_Api instance here: it was unused and opened a PHP
+		// session on every keystroke of the street search.
 		$cargus_token = get_option( 'cargus_login_token' );
 
 		// Always answer with JSON. Without a token, or for a locality with no
