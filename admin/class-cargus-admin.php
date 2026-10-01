@@ -1160,16 +1160,22 @@ class Cargus_Admin {
 						$fields['Envelopes'] = 'envelope' === $cargus_options['type'] ? (int) $colete_no : 0;
 					}
 
+					// Parcel weights as typed in the order metabox: strings, possibly
+					// empty ("") or with a decimal comma ("2,5"). Adding "" to an int
+					// is a TypeError on PHP 8 and killed the order save.
+					$parcel_weights = self::cargus_meta_list( $order_id, 'cargus_greutate_colet' );
+
 					for ( $i = 0; $i < (int) $colete_no; $i++ ) {
-						$total_weight += unserialize( get_post_meta( $order_id, 'cargus_greutate_colet', true ) )[ $i ];
+						$parcel_weight = self::cargus_to_number( $parcel_weights[ $i ] ?? null );
+						$total_weight += $parcel_weight;
 
 						$fields['ParcelCodes'][ $i ] = array(
 							'Code' => '0',
 							'Type' => get_post_meta( $order_id, 'cargus_tip_colet', true ) === 'envelope' ? 0 : 1,
 						);
 
-						if ( get_post_meta( $order_id, 'cargus_greutate_colet', true ) ) {
-							$fields['ParcelCodes'][ $i ]['Weight'] = unserialize( get_post_meta( $order_id, 'cargus_greutate_colet', true ) )[ $i ];
+						if ( $parcel_weight > 0 ) {
+							$fields['ParcelCodes'][ $i ]['Weight'] = $parcel_weight;
 						}
 
 						if ( get_post_meta( $order_id, 'cargus_lungime_colet', true ) ) {
@@ -2242,6 +2248,42 @@ class Cargus_Admin {
 			}
 		}
 		
+	}
+
+	/**
+	 * Read a per-parcel list saved by the order metabox repeater.
+	 *
+	 * The repeater stores a serialized array per field; a missing or broken
+	 * value yields an empty list instead of false.
+	 *
+	 * @param int    $order_id The order id.
+	 * @param string $key      The meta key.
+	 *
+	 * @since 1.6.0-fix
+	 * @return array
+	 */
+	private static function cargus_meta_list( $order_id, $key ): array {
+		$raw  = get_post_meta( $order_id, $key, true );
+		$list = is_string( $raw ) ? maybe_unserialize( $raw ) : $raw;
+
+		return is_array( $list ) ? $list : array();
+	}
+
+	/**
+	 * Turn a typed quantity ("2", "2.5", "2,5", "", null) into a number.
+	 *
+	 * @param mixed $value The typed value.
+	 *
+	 * @since 1.6.0-fix
+	 * @return float|int 0 when the value is empty or not numeric.
+	 */
+	private static function cargus_to_number( $value ) {
+		if ( is_int( $value ) || is_float( $value ) ) {
+			return $value;
+		}
+		$value = str_replace( ',', '.', trim( (string) $value ) );
+
+		return is_numeric( $value ) ? $value + 0 : 0;
 	}
 
 	/**
