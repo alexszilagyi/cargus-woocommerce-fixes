@@ -406,10 +406,21 @@ index 155f45d..b87d8e4 100644
  		// disable cargus shipping methods and payment gateway if client outside RO.
  		$this->loader->add_filter( 'woocommerce_available_payment_gateways', $plugin_public, 'cargus_disable_payment_gateway' );
 diff --git a/public/class-cargus-public.php b/public/class-cargus-public.php
-index 0e4d295..eff8870 100644
+index 0e4d295..7d5a491 100644
 --- a/public/class-cargus-public.php
 +++ b/public/class-cargus-public.php
-@@ -278,13 +278,16 @@ class Cargus_Public {
+@@ -223,7 +223,9 @@ class Cargus_Public {
+ 				'cargus',
+ 				plugin_dir_url( __FILE__ ) . 'js/cargus.js',
+ 				array( 'jquery' ),
+-				$this->version,
++				// The plugin version alone never changes when the script does,
++				// so browsers and CDNs keep serving a stale copy for hours.
++				$this->version . '.' . filemtime( plugin_dir_path( __FILE__ ) . 'js/cargus.js' ),
+ 				false
+ 			);
+ 
+@@ -278,13 +280,16 @@ class Cargus_Public {
  			wp_die( 'Nonce verification failed' );
  		}
  
@@ -427,7 +438,7 @@ index 0e4d295..eff8870 100644
  			$cargus_token = get_option( 'cargus_login_token' );
  
  			if ( $cargus_token && ! is_array( $cargus_token ) && ! is_object( $cargus_token ) ) {
-@@ -305,6 +308,10 @@ class Cargus_Public {
+@@ -305,6 +310,10 @@ class Cargus_Public {
  					}
  				}
  				echo wp_json_encode( $options );
@@ -438,7 +449,7 @@ index 0e4d295..eff8870 100644
  			}
  
  			wp_die();
-@@ -428,21 +435,38 @@ class Cargus_Public {
+@@ -428,21 +437,38 @@ class Cargus_Public {
  			wp_die( 'Nonce verification failed' );
  		}
  
@@ -482,7 +493,7 @@ index 0e4d295..eff8870 100644
  							$options[] = array(
  								'StreetName'    => $street_name,
  								'StreetId'      => $street->StreetId, //phpcs:ignore
-@@ -463,8 +487,10 @@ class Cargus_Public {
+@@ -463,8 +489,10 @@ class Cargus_Public {
  					}
  					echo wp_json_encode( $options );
  				} else {
@@ -494,7 +505,7 @@ index 0e4d295..eff8870 100644
  			}
  			wp_die();
  		}
-@@ -822,7 +848,9 @@ class Cargus_Public {
+@@ -822,7 +850,9 @@ class Cargus_Public {
  			if ( isset( $cargus_options['street-select'] ) && 'yes' === $cargus_options['street-select'] ) {
  				$fields['street'] = array(
  					'label'       => __( 'Strada', 'cargus' ),
@@ -505,7 +516,7 @@ index 0e4d295..eff8870 100644
  					'required'    => true,
  					'class'       => array( 'form-row-wide', 'address-field' ),
  					'clear'       => true,
-@@ -838,7 +866,7 @@ class Cargus_Public {
+@@ -838,7 +868,7 @@ class Cargus_Public {
  
  				$fields['street_number'] = array(
  					'label'       => __( 'Numar', 'cargus' ),
@@ -514,7 +525,7 @@ index 0e4d295..eff8870 100644
  					'required'    => true,
  					'class'       => array( 'form-row-wide', 'address-field' ),
  					'clear'       => true,
-@@ -847,8 +875,11 @@ class Cargus_Public {
+@@ -847,8 +877,11 @@ class Cargus_Public {
  				);
  
  				if ( WC()->session ) {
@@ -528,7 +539,7 @@ index 0e4d295..eff8870 100644
  					}
  				}
  			}
-@@ -917,6 +948,43 @@ class Cargus_Public {
+@@ -917,6 +950,43 @@ class Cargus_Public {
  		return $fields;
  	}
  
@@ -572,7 +583,7 @@ index 0e4d295..eff8870 100644
  	/**
  	 * Set the deffault data for the new address custom fields.
  	 *
-@@ -1116,7 +1184,7 @@ class Cargus_Public {
+@@ -1116,7 +1186,7 @@ class Cargus_Public {
  				foreach ( $counties as $county ) {
  					if ( trim( addslashes( sanitize_text_field( $_POST['judet'] ) ) ) === $county['Abbreviation'] ) { //phpcs:ignore
  						$localities = $cargus_cache->get_localities( $county['CountyId'] ); //phpcs:ignore
@@ -581,7 +592,7 @@ index 0e4d295..eff8870 100644
  							$options[ $locality->Name ] = array( $locality->InNetwork ? 0 : ( ! $locality->ExtraKm ? 0 : $locality->ExtraKm ), $locality->LocalityId, $locality->Name, $locality->PostalCode, $locality->SaturdayDelivery );//phpcs:ignore
  						}
  						break;
-@@ -1162,14 +1230,12 @@ class Cargus_Public {
+@@ -1162,14 +1232,12 @@ class Cargus_Public {
  		// check if the locality id was sent.
  		if ( isset( $_POST['locality_id'] ) ) {
  			// check if the pickup point is from Bucharest.
@@ -602,7 +613,7 @@ index 0e4d295..eff8870 100644
  
  			$additional_delivery = array(
  				'pre10' => false,
-@@ -1180,9 +1246,10 @@ class Cargus_Public {
+@@ -1180,9 +1248,10 @@ class Cargus_Public {
  			$cttd = file_get_contents( plugin_dir_path( __DIR__ ) . 'admin/locations/cttd.json' );
  			// Convert to array.
  			$cttd_array = json_decode( $cttd, true );
